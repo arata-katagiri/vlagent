@@ -13,6 +13,11 @@ from ..actions.schema import ActionCall, Safety
 
 console = Console()
 
+# Optional VoiceSession (app/voice.py), set by main() under --voice. When set,
+# the plan summary, clarification questions, confirmations and the result are
+# spoken as well as printed. Nothing else is read aloud.
+voice = None
+
 BADGE = {
     Safety.SAFE: ("safe", "bold green"),
     Safety.CAUTION: ("caution", "bold yellow"),
@@ -86,6 +91,8 @@ def plan(steps: list[ActionCall], levels: list[tuple[Safety, str]], summary: str
         args = ", ".join(f"{k}={v}" for k, v in step.args.items())
         table.add_row(str(i), step.name, args, step.rationale, badge(level))
     console.print(Panel(table, title=summary or "proposed plan", border_style="cyan"))
+    if voice is not None and summary:
+        voice.say(summary)
 
 
 def rejected(steps: list[ActionCall], problems: list[str]) -> None:
@@ -112,6 +119,9 @@ def confirm(step_number: int, step: ActionCall, reason: str) -> bool:
             title="confirmation required",
         )
     )
+    if voice is not None:
+        # Spoken yes/no; anything unclear is a no, same default as typing.
+        return voice.confirm(f"Step {step_number} is irreversible. {reason}. Should I go ahead?")
     try:
         answer = Prompt.ask("  Type [bold]yes[/bold] to allow this one step", default="no")
     except (EOFError, KeyboardInterrupt):
@@ -125,23 +135,139 @@ def confirm(step_number: int, step: ActionCall, reason: str) -> bool:
 def step_result(i: int, step: ActionCall, ok: bool, reason: str) -> None:
     mark = "[green]OK[/green]" if ok else "[red]FAILED[/red]"
     console.print(f"  {i}. [bold]{step.name}[/bold] {mark} [dim]{reason}[/dim]")
+    if voice is not None and not ok:
+        # Successes stay silent while the arm moves; a failure is worth a word.
+        voice.say(f"{step.name.replace('_', ' ')} failed. {reason}")
 
 
 def question(text: str) -> None:
     console.print(Panel(Text(text), title="the agent needs a clarification", border_style="yellow"))
+    if voice is not None:
+        voice.say(text)
 
 
 def answer(text: str) -> None:
     console.print(Panel(Text(text), title="answer", border_style="cyan"))
 
 
-def report(text: str, ok: bool = True) -> None:
+def report(text: str, ok: bool = True, spoken: str | None = None) -> None:
+    """Print the result panel; under --voice, say `spoken` if given, else `text`."""
     console.print(Panel(Text(text), border_style="green" if ok else "red", title="result"))
+    if voice is not None:
+        voice.say(spoken if spoken is not None else text)
 
 
 def note(text: str) -> None:
     console.print(f"[dim]{text}[/dim]")
 
 
+# -- learned skills ----------------------------------------------------------
+def badge_str(level: str) -> str:
+    style = {"safe": "bold green", "caution": "bold yellow", "irreversible": "bold red"}.get(level, "bold")
+    return f"[{style}]{level}[/{style}]"
+
+
+def code(skill, attempt: int = 1) -> None:
+    from rich.syntax import Syntax  # noqa: PLC0415
+
+    title = f"new skill: {skill.signature()}" + (f"  (revision {attempt})" if attempt > 1 else "")
+    body = Group(
+        Text.from_markup(f"[dim]{skill.doc}[/dim]\n[dim]effect:[/dim] {skill.effect}  "
+                         f"[dim]measured as[/dim] {skill.effect_label()}\n"),
+        Syntax(skill.code, "python", theme="monokai", line_numbers=True, word_wrap=True),
+    )
+    console.print(Panel(body, title=title, border_style="magenta"))
+
+
+def rehearsal(skill, verdict) -> None:
+    m = verdict.metrics or {}
+    lines = []
+    if m.get("touched"):
+        lines.append("touched: " + ", ".join(m["touched"]))
+    if m.get("moved"):
+        lines.append("moved: " + ", ".join(f"{k} {v:.2f} m" for k, v in m["moved"].items()))
+    if m.get("rotated"):
+        lines.append("rotated: " + ", ".join(f"{k} {v:+.0f} deg" for k, v in m["rotated"].items()))
+    if m.get("tipped"):
+        lines.append("tipped over: " + ", ".join(m["tipped"]))
+    if m.get("off_table"):
+        lines.append("[red]left the table: " + ", ".join(m["off_table"]) + "[/red]")
+    if m.get("side_effects"):
+        lines.append("[yellow]side effects: " + ", ".join(m["side_effects"]) + "[/yellow]")
+    if m.get("edge_m"):
+        lines.append("near the edge: " + ", ".join(f"{k} {v:.3f} m inside" for k, v in m["edge_m"].items()))
+    if "sim_seconds" in m:
+        lines.append(f"[dim]{m['sim_seconds']:.1f} s of simulated time[/dim]")
+    who = "[bold cyan]world-verified[/bold cyan]" if verdict.verified else "[yellow]self-reported[/yellow]"
+    verdict_line = (
+        f"[bold green]PASSED[/bold green]  {verdict.reason}  " + badge_str(verdict.level) + "  " + who
+        if verdict.ok else f"[bold red]FAILED[/bold red]  {verdict.reason}  " + who
+    )
+    console.print(
+        Panel(
+            Text.from_markup("\n".join([verdict_line, *lines])),
+            title=f"rehearsal of {skill.name} (world restored)",
+            border_style="green" if verdict.ok else "red",
+        )
+    )
+
+
+def graph(registry) -> None:
+    lines = registry.graph_lines()
+    if not lines:
+        console.print(Panel(Text("No skills, so no graph yet."), title="skill graph", border_style="dim"))
+        return
+    console.print(Panel(Text("\n".join(lines)), title="skill graph  (calls = recorded, resembles = measured, model says = opinion)",
+                        border_style="magenta"))
+
+
+def confirm_revise(skill, attempt: int, remaining: int) -> bool:
+    """After a failed rehearsal: revise again, or stop here. Default is to revise."""
+    try:
+        answer = Prompt.ask(
+            f"  Let the planner revise [bold]{skill.name}[/bold] and rehearse again? "
+            f"({remaining} attempt(s) left; no or Ctrl-C stops)", default="yes"
+        )
+    except (EOFError, KeyboardInterrupt):
+        console.print()
+        return False
+    return answer.strip().lower() in ("yes", "y")
+
+
+def confirm_keep(skill) -> bool:
+    try:
+        answer = Prompt.ask(
+            f"  Keep [bold]{skill.name}[/bold] as a skill and run it for real? (yes/no)", default="yes"
+        )
+    except (EOFError, KeyboardInterrupt):
+        console.print()
+        return False
+    return answer.strip().lower() in ("yes", "y")
+
+
+def skills(registry) -> None:
+    if not registry.skills:
+        console.print(Panel(Text("No learned skills yet. Ask for something the arm cannot do."),
+                            title="skills", border_style="dim"))
+        return
+    table = Table(show_header=True, header_style="dim", border_style="dim")
+    table.add_column("skill")
+    table.add_column("effect")
+    table.add_column("level")
+    table.add_column("built from")
+    table.add_column("uses", justify="right")
+    for s in registry.skills.values():
+        built = ", ".join(s.calls) or "-"
+        if s.derived_from:
+            built += f"  [dim](model: from {s.derived_from})[/dim]"
+        if s.stale:
+            built += "  [bold yellow]STALE[/bold yellow]"
+        table.add_row(s.signature(), f"{s.effect}  [dim]{s.effect_label()}[/dim]",
+                      Text.from_markup(badge_str(s.last_level)), Text.from_markup(built), str(s.uses))
+    console.print(Panel(table, title=f"learned skills ({len(registry.skills)}) in {registry.dir}",
+                        border_style="magenta"))
+
+
 __all__ = ["console", "banner", "scene", "plan", "rejected", "confirm",
-           "step_result", "question", "answer", "report", "note", "badge"]
+           "step_result", "question", "answer", "report", "note", "badge",
+           "code", "rehearsal", "confirm_keep", "confirm_revise", "skills", "graph", "badge_str"]

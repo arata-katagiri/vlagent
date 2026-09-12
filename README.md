@@ -66,6 +66,50 @@ observe → plan → validate → show → confirm → execute → verify → re
 | `home()` | none | arm at rest pose | safe |
 | `ask_user(question)` | none | none | safe |
 
+## Skills the robot writes for itself
+
+The six actions above are the starting vocabulary, not the limit. Ask for a motion the arm
+cannot do yet and the planner **writes a new skill** instead of refusing:
+
+```
+you > rotate the red block 90 degrees
+
+  new skill: rotate(object, angle_deg)          <- the model's code, shown before anything moves
+  rehearsal of rotate (world restored)
+    PASSED  only the intended objects moved     rotated: red_block +90 deg   safe
+  Keep rotate as a skill and run it for real? (yes/no): yes
+  1. rotate OK red_block turned 90 degrees
+
+you > now rotate the green block by 45 degrees
+  1. rotate OK green_block turned 45 degrees     <- no code this time: the robot learned it
+```
+
+Three layers sit above the joints:
+
+| layer | file | what it is |
+|---|---|---|
+| 1 motion | `skills/body.py` | the `Arm` the model codes against: `move_to(xyz, yaw, tilt, seconds)`, `follow(keyframes)` for timed trajectories (throws, sweeps, taps), grasp/release, perception |
+| 2 skills | `skills/registry.py` | task-level functions, built-in or model-written, persisted as `skills/<name>.json` with their code, declared effect and rehearsal record |
+| 3 plans | `agent/planner.py` | sequences of actions and skills for one request |
+
+**Every new skill is rehearsed before it is kept.** `skills/rehearse.py` snapshots the MuJoCo state,
+runs the code in a sandbox (`skills/sandbox.py`: no imports, no file or network access, a budget of
+simulated time), measures what happened, and restores the world. The measurement, not the model,
+decides the safety class: anything that left the table is **irreversible** and needs a per-step
+`yes`; a fragile object touched is **caution**. If the skill's own `check()` says the declared effect
+did not happen, the metrics go back to the model and it revises the code, at most three times.
+
+```
+you > knock the cup over
+  new skill: knock_over(object)  ... rehearsal FAILED: declared effect not achieved (revision 2, 3)
+  rehearsal of knock_over (world restored)
+    PASSED  cup left the table   irreversible     tipped over: cup   side effects: red_block
+  Step 1 is irreversible. Type yes to allow this one step (no):
+```
+
+`skills` lists the library; `forget <name>` removes one; `--skills-dir` chooses where they live.
+Learned skills can call each other through `arm.skill(name, **args)`.
+
 ## Setup
 
 macOS on Apple Silicon, Python 3.13. CPU only — no GPU required.
@@ -99,7 +143,8 @@ python  -m robot_agent.app.main --no-viewer --record  # headless, writes runs/*.
 | `--inject-failure` | Nudges an object on release, to exercise verification and replanning |
 | `--no-viewer` | Headless simulation |
 | `--no-log` | Skip the JSONL run log |
-| `--no-safety` | Disable the policy checks and the confirmation gate — the agent executes whatever it plans and physics decides |
+| `--safety` | Enable the policy checks and the confirmation gate (fragile, stability, irreversible). **Off by default** |
+| `--skills-dir` | Where learned skills are kept (default `./skills`) |
 
 Tests are headless and never open the viewer:
 
@@ -107,9 +152,9 @@ Tests are headless and never open the viewer:
 pytest          # 62 tests
 ```
 
-## Running it unrestricted
+## Safety is opt-in
 
-`--no-safety` turns off the policy layer: nothing is refused for being unwise,
+Without `--safety` the policy layer is off: nothing is refused for being unwise,
 unstable or irreversible, and nothing is confirmed. The banner turns red so the mode is never
 ambiguous. Checks that describe what is *impossible* still apply — an object must exist, the gripper
 holds one thing, a target must be within reach — because without those the executor has nothing to

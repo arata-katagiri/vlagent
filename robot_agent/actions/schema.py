@@ -121,8 +121,8 @@ def plan_tool_schema() -> list[dict]:
         "properties": {
             "name": {
                 "type": "string",
-                "enum": list(ACTION_NAMES),
-                "description": "Which action to run.",
+                "enum": list(ACTION_NAMES) + _learned_names(),
+                "description": "Which action or learned skill to run.",
             },
             "object": {
                 "type": "string",
@@ -144,6 +144,10 @@ def plan_tool_schema() -> list[dict]:
                 "description": f"Required by push, in metres, 0 to {MAX_PUSH_DISTANCE_M}.",
             },
             "question": {"type": "string", "description": "Required by ask_user."},
+            "angle_deg": {"type": "number", "description": "Degrees, for learned skills that turn."},
+            "height_m": {"type": "number", "description": "Metres, for learned skills that lift or tap."},
+            "count": {"type": "integer", "description": "Repetitions, for learned skills."},
+            "speed": {"type": "number", "description": "0.1 (slow) to 2.0 (fast), for learned skills."},
             "rationale": {
                 "type": "string",
                 "description": "One short sentence on why this step is needed.",
@@ -206,11 +210,89 @@ def plan_tool_schema() -> list[dict]:
                 },
             },
         },
+        define_skill_tool(),
     ]
 
 
+def _learned_names() -> list[str]:
+    from ..skills.registry import REGISTRY  # noqa: PLC0415
+
+    return REGISTRY.names()
+
+
+def define_skill_tool() -> dict:
+    """The tool that lets the planner write a new skill (see skills/prompt.py)."""
+    from ..skills.registry import EFFECT_KINDS, SKILL_ARG_KEYS  # noqa: PLC0415
+
+    return {
+        "type": "function",
+        "function": {
+            "name": "define_skill",
+            "description": (
+                "Write a new skill when no action or learned skill can do what was "
+                "asked. It is rehearsed in the simulator and measured before it is "
+                "kept; afterwards you will be asked to plan again using it."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string", "description": "snake_case verb, e.g. rotate, knock_over, sweep"},
+                    "doc": {"type": "string", "description": "One line: what the skill does, in general."},
+                    "effect": {"type": "string", "description": "The outcome, one sentence, for the user."},
+                    "effect_kind": {
+                        "type": "string",
+                        "enum": list(EFFECT_KINDS),
+                        "description": (
+                            "What the simulator should measure to confirm the skill worked. "
+                            "Use 'other' only if none fits; then only your check() can judge it."
+                        ),
+                    },
+                    "effect_of": {
+                        "type": "string",
+                        "enum": list(SKILL_ARG_KEYS),
+                        "description": "Which argument names the object the effect applies to (usually 'object').",
+                    },
+                    "effect_value": {
+                        "type": "string",
+                        "description": (
+                            "For moves_at_least / rotates_by: a number, or the name of the argument "
+                            "that holds it (e.g. 'angle_deg'). Empty otherwise."
+                        ),
+                    },
+                    "args": {
+                        "type": "array",
+                        "items": {"type": "string", "enum": list(SKILL_ARG_KEYS)},
+                        "description": "Argument names run() accepts.",
+                    },
+                    "example_args_json": {
+                        "type": "string",
+                        "description": 'JSON object of argument values for the current request, e.g. {"object": "red_block", "angle_deg": 90}',
+                    },
+                    "code": {
+                        "type": "string",
+                        "description": "Python defining run(arm, **args) and optionally check(before, after, **args).",
+                    },
+                    "summary": {"type": "string", "description": "One sentence for the user."},
+                    "derived_from": {
+                        "type": "string",
+                        "description": "Your opinion: the existing skill this one is built from or adapted from, if any.",
+                    },
+                    "similar_to": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Your opinion: existing skills this one resembles. The measured motion is stored separately.",
+                    },
+                },
+                "required": ["name", "doc", "effect", "effect_kind", "effect_of", "args",
+                             "example_args_json", "code", "summary"],
+            },
+        },
+    }
+
+
 # Step fields that carry action arguments, as opposed to bookkeeping.
-ARG_KEYS = ("object", "target", "x_m", "y_m", "direction", "distance_m", "question")
+ARG_KEYS = ("object", "target", "x_m", "y_m", "direction", "distance_m", "question",
+            "angle_deg", "height_m", "count", "speed")
 
 
 __all__ = [

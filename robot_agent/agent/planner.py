@@ -12,10 +12,10 @@ from dataclasses import dataclass, field
 
 from ..actions.executor import validate_plan
 from ..actions.schema import ActionCall
-from .llm import Answer, Plan, Question
+from .llm import Answer, Plan, Question, SkillProposal
 
 MAX_REPLANS = 2
-MAX_REPLAN_ATTEMPTS = 2
+MAX_REPLAN_ATTEMPTS = 3
 
 
 @dataclass
@@ -26,6 +26,7 @@ class Outcome:
     summary: str = ""
     question: str | None = None
     answer: str | None = None
+    skill: SkillProposal | None = None
     problems: list[str] = field(default_factory=list)
     attempts: int = 0
     rejected: list[tuple[list[ActionCall], list[str]]] = field(default_factory=list)
@@ -37,6 +38,7 @@ class Outcome:
             and not self.problems
             and self.question is None
             and self.answer is None
+            and self.skill is None
         )
 
 
@@ -65,6 +67,10 @@ def plan(
 
         if isinstance(proposal, Answer):
             outcome.answer = proposal.text
+            return outcome
+
+        if isinstance(proposal, SkillProposal):
+            outcome.skill = proposal
             return outcome
 
         if not isinstance(proposal, Plan) or not proposal.steps:

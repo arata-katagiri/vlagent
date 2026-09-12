@@ -53,6 +53,13 @@ def policy_enabled() -> bool:
 # A surface must be flat and stable to stack on. Anything else is refused.
 STACKABLE_TARGETS = ("tray", "red_block", "green_block", "blue_block")
 
+# Extension points for scenario policies (see sim/lab_scene.py). A precondition
+# hook returns a list of problems for a built-in call; a classify hook returns
+# a (Safety, reason) verdict or None to defer. Consulted only while the policy
+# is enabled, and only for calls the built-in checks already accept.
+PRECONDITION_HOOKS: list = []
+CLASSIFY_HOOKS: list = []
+
 
 def _obj(state: dict, name: str) -> dict | None:
     return state["objects"].get(name)
@@ -111,11 +118,43 @@ def stacking_overhang(state: dict, held: str, target: str) -> tuple[float, float
     return 2 * max(hx, hy), 2 * max(tx, ty)
 
 
+def _skill_preconditions(name: str, args: dict, state: dict) -> list[str]:
+    """Learned skills: only what is impossible is checked here. Their policy
+    level comes from the rehearsal measurement (see skills/rehearse.py)."""
+    from ..skills.registry import REGISTRY  # noqa: PLC0415
+
+    skill = REGISTRY.get(name)
+    if skill is None:
+        return [f"unknown action '{name}'"]
+    problems: list[str] = []
+    for key in ("object", "target"):
+        if key in skill.args and key not in args:
+            problems.append(f"{name} is missing required argument: {key}")
+        elif key in args and _obj(state, str(args[key])) is None:
+            problems.append(f"there is no object called '{args[key]}'")
+    return problems
+
+
+def _classify_skill(name: str) -> tuple[Safety, str]:
+    from ..skills.registry import REGISTRY  # noqa: PLC0415
+
+    skill = REGISTRY.get(name)
+    if skill is None:
+        return Safety.CAUTION, f"{name} is not a known skill"
+    level = skill.last_level
+    why = next((r.get("reason", "") for r in reversed(skill.rehearsals) if r.get("ok")), "")
+    if level == "irreversible":
+        return Safety.IRREVERSIBLE, f"in rehearsal, {why}"
+    if level == "caution":
+        return Safety.CAUTION, (f"learned skill; in rehearsal, {why}" if why else "learned skill, not yet rehearsed")
+    return Safety.SAFE, f"learned skill; in rehearsal, {why}"
+
+
 def check_preconditions(call: ActionCall, state: dict) -> list[str]:
     """Return human-readable reasons the call cannot run now. Empty means OK."""
     name, args = call.name, call.args
     if name not in ACTIONS:
-        return [f"unknown action '{name}'"]
+        return _skill_preconditions(name, args, state)
 
     required, _ = ACTIONS[name]
     missing = [a for a in required if a not in args]
@@ -142,22 +181,35 @@ def check_preconditions(call: ActionCall, state: dict) -> list[str]:
             problems.append(f"the gripper is already holding {holding}")
 
     elif name == "place_on":
-        target = args["target"]
+        named = args["target"]
+        target = named
         obj = _obj(state, target)
         if holding is None:
             problems.append("the gripper is not holding anything")
         if obj is None:
             problems.append(f"there is no object called '{target}'")
         else:
+            if holding is not None and holding in state["objects"]:
+                # Something already sitting on the named target means the held
+                # object lands on top of that stack (the executor resolves it the
+                # same way), so the policy must judge the surface it will touch.
+                from .executor import resolve_place_target  # noqa: PLC0415  # executor imports this module
+
+                target = resolve_place_target(state, named, holding)
+                obj = _obj(state, target) or obj
+            via = (
+                f" (placing on {named} means landing on {target}, which sits on top of it)"
+                if target != named else ""
+            )
             if target == holding:
                 problems.append(f"cannot place {target} on itself")
             elif _POLICY_ENABLED:
                 if obj["fragile"]:
                     problems.append(
-                        f"{target} is fragile and is not a stable surface to stack on"
+                        f"{target} is fragile and is not a stable surface to stack on{via}"
                     )
                 elif target not in STACKABLE_TARGETS:
-                    problems.append(f"{target} is not a flat surface to stack on")
+                    problems.append(f"{target} is not a flat surface to stack on{via}")
                 elif holding is not None:
                     fit = stacking_overhang(state, holding, target)
                     if fit is not None:
@@ -196,6 +248,9 @@ def check_preconditions(call: ActionCall, state: dict) -> list[str]:
         if not (0.0 < distance <= MAX_PUSH_DISTANCE_M):
             problems.append(f"distance_m must be greater than 0 and at most {MAX_PUSH_DISTANCE_M}")
 
+    if _POLICY_ENABLED and not problems:
+        for hook in PRECONDITION_HOOKS:
+            problems.extend(hook(call, state))
     return problems
 
 
@@ -209,6 +264,14 @@ def classify(call: ActionCall, state: dict) -> tuple[Safety, str]:
 
     if not _POLICY_ENABLED:
         return Safety.SAFE, "safety policy disabled (--no-safety)"
+
+    if name not in ACTIONS:
+        return _classify_skill(name)
+
+    for hook in CLASSIFY_HOOKS:
+        verdict = hook(call, state)
+        if verdict is not None:
+            return verdict
 
     if name == "pick":
         obj = _obj(state, args.get("object", ""))

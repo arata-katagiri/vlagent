@@ -9,3 +9,8 @@ openai==3.13.0
 rich==15.0.0
 python-dotenv==1.2.3
 pytest==9.1.1
+
+# Voice (optional; --voice only). Apple silicon. Whisper runs locally, so speech
+# to text costs nothing and works with no network.
+mlx-whisper==0.4.3
+sounddevice==0.5.6

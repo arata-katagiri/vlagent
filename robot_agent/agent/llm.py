@@ -20,6 +20,9 @@ from ..actions.schema import ARG_KEYS, ActionCall, describe_actions, plan_tool_s
 
 TIMEOUT_S = 30.0
 MAX_RETRIES = 1
+# Conversation memory handed to the model: the most recent turns, each clipped.
+HISTORY_TURNS = 30
+HISTORY_CHARS = 400
 
 _RULES = """\
 You control a real robot arm above a table. Act only through the provided tools.
@@ -33,12 +36,20 @@ Choosing a tool:
   the scene state you were given. Do not turn a question back into a question.
 - Something you cannot do is explained with the answer tool. Objects may only be
   set down on the listed place_on targets; that list is about destinations, not
-  about which objects can be carried, and only if the carried object's
-  Note the direction: an object that is not a valid place_on target can still be
-  picked up and put somewhere else.
+  about which objects can be carried or pushed. Note the direction: an object
+  that is not a valid place_on target can still be picked up, pushed, or put
+  somewhere else. Any object on the table can be pushed.
+- When a step failed and you are replanning, change something: a different
+  spot (place_at with coordinates spread well apart), a different order, or a
+  different surface. Do not repeat the step that just failed unchanged.
 - Do not refuse on your own guess about whether something will fit or balance.
   Propose the plan; the safety checker measures it and will tell you if it fails.
   Only refuse outright for what the scene state plainly rules out.
+- The conversation so far (earlier commands and what happened to them) comes
+  before the current command. Use it to resolve follow-ups such as "now the
+  green one", "do that again", "put it back", or "why not?". A question about
+  what you did or why something failed is answered with the answer tool,
+  quoting the recorded reason.
 - ask_user is only for a genuine ambiguity where their reply changes which action
   you would take.
 - propose_plan is only for actually moving something.
@@ -53,7 +64,9 @@ Rules:
 - There is no bin, no floor target, and no way to make an object disappear. The
   only way to get something off the table is place_at at a point beyond the table
   bounds, and the safety checker will class that as irreversible and put it to the
-  user. Propose it if that is what was asked, and let the user decide.
+  user. Propose it if that is what was asked, and let the user decide. The far
+  edge of the table is beyond the arm's reach, so use a point 5-8 cm past the
+  nearer side edge (y just beyond y_min or y_max) at the object's current x.
 - Never propose a plan whose net effect is nothing, such as picking an object up
   and putting it back where it already is. If the request cannot be achieved with
   these actions, call ask_user and say what you cannot do.
@@ -77,11 +90,24 @@ own judgement -- if it can be expressed with these actions, propose it.
 SYSTEM_PROMPT = _RULES.format(actions=describe_actions())
 
 
+# Extra rule paragraphs a scenario adds to the system prompt (see sim/lab_scene.py).
+SCENARIO_RULES: list[str] = []
+
+
 def system_prompt() -> str:
-    """The system prompt for the current policy setting."""
+    """Rules + live catalogue (built-ins and learned skills) + how to write a skill,
+    for the current policy setting."""
+    from ..skills.prompt import AUTHORING_GUIDE  # noqa: PLC0415
+    from ..skills.registry import REGISTRY  # noqa: PLC0415
+
+    actions = describe_actions()
+    learned = REGISTRY.describe()
+    if learned:
+        actions += "\n\n" + learned
+    base = _RULES.format(actions=actions) + "".join(SCENARIO_RULES) + AUTHORING_GUIDE
     if policy_enabled():
-        return SYSTEM_PROMPT
-    return SYSTEM_PROMPT + "\n" + _UNRESTRICTED
+        return base
+    return base + "\n" + _UNRESTRICTED
 
 
 @dataclass
@@ -109,6 +135,65 @@ class Answer:
     """
 
     text: str
+
+
+@dataclass
+class SkillProposal:
+    """The model wants to write a new skill rather than plan with what exists."""
+
+    name: str
+    doc: str
+    effect: str
+    args: list[str]
+    code: str
+    example_args: dict
+    summary: str = ""
+    effect_kind: str = "other"
+    effect_of: str = "object"
+    effect_value: str = ""
+    derived_from: str = ""
+    similar_to: list[str] = field(default_factory=list)
+
+
+def _skill_from_args(raw: dict) -> SkillProposal:
+    try:
+        example = json.loads(raw.get("example_args_json") or "{}")
+        if not isinstance(example, dict):
+            example = {}
+    except json.JSONDecodeError:
+        example = {}
+    return SkillProposal(
+        name=str(raw.get("name", "")).strip().lower().replace(" ", "_"),
+        doc=str(raw.get("doc", "")),
+        effect=str(raw.get("effect", "")),
+        args=[str(a) for a in (raw.get("args") or [])],
+        code=str(raw.get("code", "")),
+        example_args=example,
+        summary=str(raw.get("summary", "")),
+        effect_kind=str(raw.get("effect_kind") or "other"),
+        effect_of=str(raw.get("effect_of") or "object"),
+        effect_value=str(raw.get("effect_value") or ""),
+        derived_from=str(raw.get("derived_from") or ""),
+        similar_to=[str(x) for x in (raw.get("similar_to") or []) if x],
+    )
+
+
+def _feedback_text(feedback: list[str]) -> str:
+    body = "\n".join(f"- {p}" for p in feedback)
+    if any(p.startswith("rehearsal") for p in feedback):
+        return (
+            "The skill you defined was rehearsed in the simulator and did not pass:\n"
+            + body
+            + "\nRevise the code and call define_skill again with the same name, "
+            "fixing these problems. Do not give up on the skill unless it is impossible."
+        )
+    if any(p.startswith("the skill '") for p in feedback):
+        return body + "\nNow propose the plan for the request using it."
+    return (
+        "That plan was rejected by the safety checker:\n"
+        + body
+        + "\nPropose a corrected plan that avoids these problems."
+    )
 
 
 @dataclass
@@ -190,6 +275,29 @@ def _xyz(p) -> str:
     return f"({p[0]:.2f}, {p[1]:.2f}, {p[2]:.2f})"
 
 
+def history_messages(transcript: list[dict] | None) -> list[dict]:
+    """Prior turns as chat messages, oldest first.
+
+    The current command is always the last user entry when propose() runs
+    (main logs it before planning), so a trailing user entry is dropped here
+    and delivered once, with the scene, in the final user message. Consecutive
+    entries from the same role are merged into one message.
+    """
+    if not transcript:
+        return []
+    turns = list(transcript[-HISTORY_TURNS:])
+    if turns and turns[-1]["role"] == "user":
+        turns.pop()
+    merged: list[dict] = []
+    for t in turns:
+        text = str(t["content"])[:HISTORY_CHARS]
+        if merged and merged[-1]["role"] == t["role"]:
+            merged[-1]["content"] += "\n" + text
+        else:
+            merged.append({"role": t["role"], "content": text})
+    return merged
+
+
 def _step_args(step: dict) -> dict:
     """Collect a step's arguments from flat fields, or a nested args object.
 
@@ -230,12 +338,15 @@ class LLMClient:
             max_retries=MAX_RETRIES,
         )
         self.usage = Usage()
+        # Conversation memory; main.py points this at the run log's transcript.
+        self.transcript: list[dict] | None = None
 
     def propose(
         self, command: str, state: dict, feedback: list[str] | None = None
     ) -> Plan | Question | Answer:
         messages = [
             {"role": "system", "content": system_prompt()},
+            *history_messages(self.transcript),
             {
                 "role": "user",
                 "content": f"Scene:\n{describe_state(state)}\n\nCommand: {command}",
@@ -245,11 +356,7 @@ class LLMClient:
             messages.append(
                 {
                     "role": "user",
-                    "content": (
-                        "That plan was rejected by the safety checker:\n"
-                        + "\n".join(f"- {p}" for p in feedback)
-                        + "\nPropose a corrected plan that avoids these problems."
-                    ),
+                    "content": _feedback_text(feedback),
                 }
             )
 
@@ -258,7 +365,7 @@ class LLMClient:
             messages=messages,
             tools=plan_tool_schema(),
             tool_choice="required",
-            max_tokens=800,
+            max_tokens=2000,
         )
         self.usage.add(getattr(response, "usage", None))
 
@@ -277,6 +384,8 @@ class LLMClient:
             return Question(text=str(args.get("question", "Could you clarify?")))
         if call.function.name == "answer":
             return Answer(text=str(args.get("text", "")))
+        if call.function.name == "define_skill":
+            return _skill_from_args(args)
         return Plan(steps=_steps_from_args(args), summary=str(args.get("summary", "")))
 
 
@@ -291,6 +400,7 @@ class MockLLM:
     """
 
     usage: Usage = field(default_factory=Usage)
+    transcript: list[dict] | None = None  # accepted for parity; the mock ignores it
 
     def propose(
         self, command: str, state: dict, feedback: list[str] | None = None
@@ -403,5 +513,5 @@ def build_llm(mock: bool) -> LLMClient | MockLLM:
 
 __all__ = [
     "LLMClient", "MockLLM", "Plan", "Question", "Answer", "Usage",
-    "describe_state", "build_llm", "SYSTEM_PROMPT", "system_prompt",
+    "describe_state", "build_llm", "SYSTEM_PROMPT", "system_prompt", "history_messages",
 ]

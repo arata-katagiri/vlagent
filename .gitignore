@@ -20,3 +20,6 @@ __pycache__/
 # Provider scratch files that may hold live keys
 openrouter.md
 *.key
+
+# MuJoCo compile log
+MUJOCO_LOG.TXT

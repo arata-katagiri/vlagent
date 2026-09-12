@@ -31,8 +31,19 @@ CLEARANCE_TOLERANCE_M = 0.025
 NO_OP_TOLERANCE_M = 0.01
 
 
-# Clearance between two items sharing a surface, in metres.
-SIDE_BY_SIDE_CLEARANCE_M = 0.045
+# Clearance between two items sharing a surface, centre to centre, in metres.
+# Wide enough for the fingers around a held block to clear a neighbour.
+SIDE_BY_SIDE_CLEARANCE_M = 0.065
+# A descent that stalls this close to its target (something in the way, a
+# neighbour brushing the hand) still counts: release or grasp from there and let
+# physics settle, then let the verifier judge the outcome.
+DESCENT_SLACK_M = 0.04
+# Height above the table top the empty gripper travels at between actions.
+SAFE_TRAVEL_M = 0.15
+# Push contact: this far above the object's bottom, so tall or round things
+# slide instead of tipping; and this far behind the object's face at the start.
+PUSH_CONTACT_Z_M = 0.02
+PUSH_STANDOFF_M = 0.03
 
 
 def place_on_spot(state: dict, target: str, held: str) -> list[float]:
@@ -72,11 +83,39 @@ def place_on_spot(state: dict, target: str, held: str) -> list[float]:
         for sy in (-1.0, 1.0):
             candidates.append((sx * span_x, sy * span_y))
 
+    # First slot that meets the clearance wins. When none does, take the slot
+    # farthest from everything already there, so a crowded surface degrades to
+    # "as spread out as possible" instead of dropping the newcomer on whatever
+    # sits at the centre.
+    best, best_gap = None, -1.0
     for ox, oy in candidates:
         x, y = tx + ox, ty + oy
-        if all(math.dist([x, y], o) >= SIDE_BY_SIDE_CLEARANCE_M for o in occupied):
+        gap = min(math.dist([x, y], o) for o in occupied)
+        if gap >= SIDE_BY_SIDE_CLEARANCE_M:
             return [x, y, drop_z]
-    return [tx, ty, drop_z]
+        if gap > best_gap:
+            best, best_gap = [x, y, drop_z], gap
+    return best or [tx, ty, drop_z]
+
+
+def resolve_place_target(state: dict, target: str, held: str | None) -> str:
+    """Placing onto something that already carries an object means the top of
+    that stack, unless the surface has room beside what is there (the tray)."""
+    seen: set[str] = set()
+    while target in state["objects"] and target not in seen:
+        seen.add(target)
+        tobj = state["objects"][target]
+        stacked = [n for n in tobj["supporting"] if n in state["objects"] and n != held]
+        if not stacked:
+            return target
+        hx, hy = 0.0, 0.0
+        if held in state["objects"]:
+            hx, hy, _ = state["objects"][held]["half_extent_m"]
+        thx, thy, _ = tobj["half_extent_m"]
+        if thx - hx >= SIDE_BY_SIDE_CLEARANCE_M / 2 or thy - hy >= SIDE_BY_SIDE_CLEARANCE_M / 2:
+            return target
+        target = stacked[-1]
+    return target
 
 
 def _apply_effects(call: ActionCall, state: dict) -> dict:
@@ -111,6 +150,7 @@ def _apply_effects(call: ActionCall, state: dict) -> dict:
     elif name == "place_on":
         held, target = gripper["holding"], args.get("target")
         if held and target in objects:
+            target = resolve_place_target(s, target, held)
             spot = place_on_spot(s, target, held)
             objects[held].update(
                 held=False, on_top_of=target, on_table=True, position_m=spot,
@@ -165,7 +205,50 @@ def classify_plan(plan: list[ActionCall], state: dict) -> list[tuple[Safety, str
     return levels
 
 
+def _is_skill(name: str) -> bool:
+    from ..skills.registry import REGISTRY  # noqa: PLC0415
+
+    return name in REGISTRY
+
+
+_LAST_SKILL_NOTE = ""
+
+
+def _run_skill(call: ActionCall, backend, get_state) -> tuple[bool, str]:
+    """Run a learned skill for real, with the same measurement as rehearsal."""
+    global _LAST_SKILL_NOTE
+    from ..skills.body import Arm  # noqa: PLC0415
+    from ..skills.registry import REGISTRY  # noqa: PLC0415
+    from ..skills.rehearse import classify as classify_metrics, measure, observe, verify_effect  # noqa: PLC0415
+    from ..skills.sandbox import compile_skill  # noqa: PLC0415
+
+    skill = REGISTRY.get(call.name)
+    fns = compile_skill(skill.code)
+    before = observe(backend, get_state)
+    arm = Arm(backend, get_state, registry=REGISTRY)
+    fns["run"](arm, **call.args)
+    after = observe(backend, get_state)
+    after["touched"] = sorted(arm.touched)
+    skill.uses += 1
+    mentioned = {v for v in call.args.values() if isinstance(v, str) and v in before["objects"]}
+    metrics = measure(before, after, mentioned, touched=arm.touched)
+    ok, why, verified = verify_effect(skill, call.args, before, after, metrics, mentioned)
+    if not ok:
+        return False, f"effect not achieved: {why}"
+    note = why if verified else ""
+    if fns["check"] is not None:
+        result = fns["check"](before, after, **call.args)
+        c_ok, c_why = (result if isinstance(result, tuple) else (bool(result), ""))
+        if not c_ok:
+            return False, f"the skill's own check failed: {c_why or skill.effect}"
+        note = note or c_why or skill.effect
+    _LAST_SKILL_NOTE = (note or classify_metrics(metrics)[1]) + (" [world-verified]" if verified else " [self-reported]")
+    return True, ""
+
+
 def is_no_op(plan: list[ActionCall], state: dict) -> bool:
+    if any(_is_skill(s.name) for s in plan):
+        return False
     """Whether the plan would leave the world materially unchanged.
 
     Picking an object up and setting it back down where it already was passes
@@ -210,6 +293,8 @@ def validate_plan(plan: list[ActionCall], state: dict) -> list[str]:
 
 
 def _verify(call: ActionCall, before: dict, after: dict) -> tuple[bool, str]:
+    if _is_skill(call.name):
+        return True, _LAST_SKILL_NOTE or "learned skill ran; effect measured during the run"
     """Check the postcondition of a call against ground truth."""
     name, args = call.name, call.args
     objects = after["objects"]
@@ -231,8 +316,8 @@ def _verify(call: ActionCall, before: dict, after: dict) -> tuple[bool, str]:
         return True, f"holding {target}, lifted {rise:.3f} m"
 
     if name == "place_on":
-        target = args["target"]
         held = before["gripper"]["holding"]
+        target = resolve_place_target(before, args["target"], held)
         if after["gripper"]["holding"] is not None:
             return False, f"the gripper is still holding {after['gripper']['holding']}"
         obj = objects.get(held)
@@ -289,7 +374,7 @@ def execute(
         return ActionResult(False, "; ".join(problems), before)
 
     try:
-        ok, reason = _run(call, backend, before)
+        ok, reason = _run(call, backend, before, get_state)
     except Exception as exc:  # a backend failure must not kill the loop
         return ActionResult(False, f"{call.name} raised {type(exc).__name__}: {exc}", get_state())
 
@@ -314,9 +399,48 @@ def _grasp_offset_z(state: dict, held: str | None) -> float:
 
 
 
-def _run(call: ActionCall, backend: ArmBackend, state: dict) -> tuple[bool, str]:
+def _descend(backend, target, get_state, what: str) -> tuple[bool, str]:
+    """Move down onto `target`; tolerate a stall within DESCENT_SLACK_M.
+
+    A neighbour brushing the hand, or a surface a few millimetres higher than
+    modelled, stops the servo short of its tolerance. Failing the whole step for
+    that is brittle: releasing or grasping from a couple of centimetres up works
+    in practice, and the postcondition check still decides whether it did.
+    """
+    if backend.move_to(target):
+        return True, ""
+    if get_state is None:
+        return False, f"could not descend {what}"
+    g = get_state()["gripper"]["position_m"]
+    short = g[2] - target[2]
+    lateral = math.dist(g[:2], target[:2])
+    if -0.005 <= short <= DESCENT_SLACK_M and lateral <= PLACEMENT_TOLERANCE_M:
+        return True, f"stopped {short:.3f} m short {what}; continuing"
+    return False, f"could not descend {what} (stopped {short:.3f} m short, {lateral:.3f} m off)"
+
+
+def _lift_clear(backend, get_state, state: dict) -> None:
+    """Start every action by going straight up if the gripper is low, so the
+    traverse to the next approach pose does not sweep through the scene."""
+    if get_state is None:
+        return
+    g = get_state()["gripper"]["position_m"]
+    held = state["gripper"]["holding"]
+    hang = 0.0
+    if held in state["objects"]:
+        hang = _grasp_offset_z(state, held) + state["objects"][held]["half_extent_m"][2]
+    safe_z = state["table_bounds_m"]["top_z"] + SAFE_TRAVEL_M + hang
+    if g[2] < safe_z - 0.01:
+        backend.move_to([g[0], g[1], safe_z], tolerance_m=CLEARANCE_TOLERANCE_M)
+
+
+def _run(call: ActionCall, backend: ArmBackend, state: dict, get_state=None) -> tuple[bool, str]:
+    if _is_skill(call.name):
+        return _run_skill(call, backend, get_state or (lambda: state))
     """Drive the backend through the motion for one call."""
     name, args = call.name, call.args
+    if name in ("pick", "place_on", "place_at", "push"):
+        _lift_clear(backend, get_state, state)
 
     if name == "pick":
         target = args["object"]
@@ -331,8 +455,9 @@ def _run(call: ActionCall, backend: ArmBackend, state: dict) -> tuple[bool, str]
         if not backend.move_to([x, y, top + APPROACH_HEIGHT_M], tolerance_m=CLEARANCE_TOLERANCE_M):
             return False, f"could not reach the approach pose above {target}"
         backend.open_gripper()
-        if not backend.move_to([x, y, grasp_z]):
-            return False, f"could not descend onto {target}"
+        ok, note = _descend(backend, [x, y, grasp_z], get_state, f"onto {target}")
+        if not ok:
+            return False, note
         backend.close_gripper()
         backend.attach(target)
         if not backend.move_to([x, y, grasp_z + LIFT_HEIGHT_M], tolerance_m=CLEARANCE_TOLERANCE_M):
@@ -340,15 +465,16 @@ def _run(call: ActionCall, backend: ArmBackend, state: dict) -> tuple[bool, str]
         return True, ""
 
     if name == "place_on":
-        target = args["target"]
         held = state["gripper"]["holding"]
+        target = resolve_place_target(state, args["target"], held)
         drop = place_on_spot(state, target, held)
         lift = _grasp_offset_z(state, held)
         if not backend.move_to([drop[0], drop[1], drop[2] + lift + APPROACH_HEIGHT_M],
                                tolerance_m=CLEARANCE_TOLERANCE_M):
             return False, f"could not reach the approach pose above {target}"
-        if not backend.move_to([drop[0], drop[1], drop[2] + lift]):
-            return False, f"could not descend onto {target}"
+        ok, note = _descend(backend, [drop[0], drop[1], drop[2] + lift], get_state, f"onto {target}")
+        if not ok:
+            return False, note
         backend.detach()
         backend.open_gripper()
         backend.move_to([drop[0], drop[1], drop[2] + lift + APPROACH_HEIGHT_M],
@@ -362,8 +488,9 @@ def _run(call: ActionCall, backend: ArmBackend, state: dict) -> tuple[bool, str]
         lift = _grasp_offset_z(state, held)
         if not backend.move_to([x, y, z + lift + APPROACH_HEIGHT_M], tolerance_m=CLEARANCE_TOLERANCE_M):
             return False, "could not reach the approach pose above the target point"
-        if not backend.move_to([x, y, z + lift]):
-            return False, "could not descend to the target point"
+        ok, note = _descend(backend, [x, y, z + lift], get_state, "to the target point")
+        if not ok:
+            return False, note
         backend.detach()
         backend.open_gripper()
         backend.move_to([x, y, z + lift + APPROACH_HEIGHT_M], tolerance_m=CLEARANCE_TOLERANCE_M)
@@ -373,16 +500,28 @@ def _run(call: ActionCall, backend: ArmBackend, state: dict) -> tuple[bool, str]
         target = args["object"]
         dx, dy = DIRECTION_VECTORS[args["direction"]]
         d = float(args["distance_m"])
-        pos = list(state["objects"][target]["position_m"])
-        start = [pos[0] - dx * 0.06, pos[1] - dy * 0.06, pos[2]]
+        obj = state["objects"][target]
+        pos = list(obj["position_m"])
+        hx, hy, hz = obj["half_extent_m"]
+        # Contact low on the object so tall or round things slide, not tip; for
+        # a low object the centre is already low enough.
+        contact_z = min(pos[2], pos[2] - hz + PUSH_CONTACT_Z_M)
+        contact_z = max(contact_z, state["table_bounds_m"]["top_z"] + PUSH_CONTACT_Z_M)
+        # Start behind the object's face, with room for the closed fingers.
+        back = hx * abs(dx) + hy * abs(dy) + PUSH_STANDOFF_M
+        start = [pos[0] - dx * back, pos[1] - dy * back, contact_z]
+        end = [pos[0] + dx * d, pos[1] + dy * d, contact_z]
         backend.close_gripper()
         if not backend.move_to([start[0], start[1], start[2] + APPROACH_HEIGHT_M],
                                tolerance_m=CLEARANCE_TOLERANCE_M):
             return False, f"could not reach the approach pose behind {target}"
-        if not backend.move_to(start):
+        if not backend.move_to(start, tolerance_m=CLEARANCE_TOLERANCE_M):
             return False, f"could not get behind {target}"
-        if not backend.move_to([pos[0] + dx * d, pos[1] + dy * d, pos[2]]):
-            return False, f"the push of {target} did not complete"
+        # The sweep may stall against friction or a neighbour. The verifier
+        # measures how far the object actually travelled, so do not fail here.
+        backend.move_to(end, tolerance_m=CLEARANCE_TOLERANCE_M)
+        backend.move_to([end[0], end[1], end[2] + APPROACH_HEIGHT_M],
+                        tolerance_m=CLEARANCE_TOLERANCE_M)
         return True, ""
 
     if name == "home":
@@ -397,6 +536,6 @@ def _run(call: ActionCall, backend: ArmBackend, state: dict) -> tuple[bool, str]
 __all__ = [
     "validate_plan", "classify_plan", "is_no_op", "execute", "classify",
     "check_preconditions",
-    "place_on_spot",
+    "place_on_spot", "resolve_place_target",
     "ActionCall", "ActionResult", "Safety",
 ]

@@ -1,0 +1,36 @@
+{
+  "name": "rotate",
+  "doc": "Rotate an object around its vertical axis by a specified angle.",
+  "effect": "The object is rotated around its vertical axis by the specified angle in degrees.",
+  "args": [
+    "object",
+    "angle_deg"
+  ],
+  "code": "def run(arm, object, angle_deg=90, **_):\n    p = arm.pos(object)\n    grasp_z = arm.top(object) - 0.02\n    hover = arm.top(object) + 0.10\n    arm.open()\n    arm.move_to([p[0], p[1], hover])\n    arm.move_to([p[0], p[1], grasp_z])\n    arm.grasp(object)\n    arm.move_to([p[0], p[1], hover])\n    arm.move_to([p[0], p[1], hover], yaw_deg=angle_deg)\n    arm.move_to([p[0], p[1], grasp_z + 0.005], yaw_deg=angle_deg)\n    arm.release()\n    arm.move_to([p[0], p[1], hover], yaw_deg=angle_deg)\n",
+  "author": "model",
+  "created": "2026-09-12T06:51:13+00:00",
+  "rehearsals": [
+    {
+      "ok": true,
+      "reason": "only the intended objects moved and everything stayed on the table",
+      "level": "safe",
+      "metrics": {
+        "touched": [
+          "red_block"
+        ],
+        "moved": {},
+        "rotated": {
+          "red_block": 90.0
+        },
+        "tipped": [],
+        "off_table": [],
+        "fragile_moved": [],
+        "side_effects": [],
+        "held_after": null,
+        "sim_seconds": 3.04
+      },
+      "error": null
+    }
+  ],
+  "uses": 0
+}

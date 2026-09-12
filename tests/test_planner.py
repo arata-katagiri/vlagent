@@ -182,7 +182,7 @@ def test_the_tool_schema_uses_flat_named_arguments(state):
     from robot_agent.actions.schema import plan_tool_schema
 
     tools = plan_tool_schema()
-    assert {t["function"]["name"] for t in tools} == {"propose_plan", "answer", "ask_user"}
+    assert {t["function"]["name"] for t in tools} == {"propose_plan", "answer", "ask_user", "define_skill"}
     props = tools[0]["function"]["parameters"]["properties"]["steps"]["items"]["properties"]
     for key in ("object", "target", "x_m", "y_m", "direction", "distance_m"):
         assert key in props, f"{key} must be a named property, not nested under args"
