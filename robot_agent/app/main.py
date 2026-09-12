@@ -22,6 +22,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from ..actions.executor import classify_plan, execute
+from ..actions.safety import set_policy_enabled
 from ..actions.schema import ActionCall, Safety
 from ..agent import planner
 from ..agent.llm import build_llm
@@ -64,6 +65,11 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--inject-failure", action="store_true",
                    help="nudge an object after placement, to exercise verification")
     p.add_argument("--no-log", action="store_true", help="do not write runs/*.jsonl")
+    p.add_argument(
+        "--no-safety", action="store_true",
+        help="disable the policy checks and the confirmation gate: the agent "
+             "executes whatever it plans, and physics decides the outcome",
+    )
     return p
 
 
@@ -266,14 +272,18 @@ def main() -> None:
     except ImportError:
         pass
 
+    if args.no_safety:
+        set_policy_enabled(False)
+
     llm = build_llm(args.mock_llm)
     model = "mock" if args.mock_llm else os.environ.get("OPENAI_MODEL", "unset")
     log = RunLog(enabled=not args.no_log)
+    log.write("session", backend=args.backend, model=model, safety=not args.no_safety)
 
     with ExitStack() as stack:
         get_state, backend = build_world(args, stack)
 
-        ui.banner(args.backend, model)
+        ui.banner(args.backend, model, safety=not args.no_safety)
         ui.scene(get_state())
 
         if args.demo:

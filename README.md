@@ -99,12 +99,26 @@ python  -m robot_agent.app.main --no-viewer --record  # headless, writes runs/*.
 | `--inject-failure` | Nudges an object on release, to exercise verification and replanning |
 | `--no-viewer` | Headless simulation |
 | `--no-log` | Skip the JSONL run log |
+| `--no-safety` | Disable the policy checks and the confirmation gate — the agent executes whatever it plans and physics decides |
 
 Tests are headless and never open the viewer:
 
 ```bash
 pytest          # 62 tests
 ```
+
+## Running it unrestricted
+
+`--no-safety` turns off the policy layer: nothing is refused for being unwise,
+unstable or irreversible, and nothing is confirmed. The banner turns red so the mode is never
+ambiguous. Checks that describe what is *impossible* still apply — an object must exist, the gripper
+holds one thing, a target must be within reach — because without those the executor has nothing to
+act on.
+
+It is worth running once to see why the policy exists. Told to stack onto the fragile glass, the arm
+does it: every placement passes verification at the moment of release, and then the blue block falls
+off the rim onto the table while the cup stays perched on top. The policy was not being timid; it
+was predicting that.
 
 ## Architecture
 

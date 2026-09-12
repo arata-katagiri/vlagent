@@ -25,16 +25,21 @@ def badge(level: Safety) -> Text:
     return Text(label, style=style)
 
 
-def banner(backend: str, model: str) -> None:
+def banner(backend: str, model: str, safety: bool = True) -> None:
+    mode = (
+        "[green]safety on[/green]"
+        if safety
+        else "[bold red]SAFETY OFF[/bold red] — nothing is refused, nothing is confirmed"
+    )
     console.print(
         Panel(
             Text.from_markup(
                 "[bold]Language-to-action robot arm[/bold]\n"
                 "Type a request in plain English. The plan is shown before anything moves.\n"
-                f"backend [cyan]{backend}[/cyan]   planner [cyan]{model}[/cyan]   "
+                f"backend [cyan]{backend}[/cyan]   planner [cyan]{model}[/cyan]   {mode}\n"
                 "[dim]Ctrl-D or 'quit' to exit[/dim]"
             ),
-            border_style="cyan",
+            border_style="red" if not safety else "cyan",
         )
     )
 

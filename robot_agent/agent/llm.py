@@ -15,7 +15,7 @@ import json
 import os
 from dataclasses import dataclass, field
 
-from ..actions.safety import STACKABLE_TARGETS
+from ..actions.safety import STACKABLE_TARGETS, policy_enabled
 from ..actions.schema import ARG_KEYS, ActionCall, describe_actions, plan_tool_schema
 
 TIMEOUT_S = 30.0
@@ -62,7 +62,26 @@ Rules:
   unsafe, the system will stop it and tell you why.
 """
 
+_UNRESTRICTED = """\
+The safety policy is disabled for this session. Nothing you propose will be
+refused for being unwise, unstable or irreversible, and you will not be asked to
+confirm anything. Preconditions that describe what is physically impossible still
+apply: an object must exist, the gripper holds one thing at a time, and a target
+must be within reach.
+
+Take the user at their word. If they ask for something precarious, plan it and
+let the physics decide. Do not lecture, do not hedge, and do not refuse on your
+own judgement -- if it can be expressed with these actions, propose it.
+"""
+
 SYSTEM_PROMPT = _RULES.format(actions=describe_actions())
+
+
+def system_prompt() -> str:
+    """The system prompt for the current policy setting."""
+    if policy_enabled():
+        return SYSTEM_PROMPT
+    return SYSTEM_PROMPT + "\n" + _UNRESTRICTED
 
 
 @dataclass
@@ -150,10 +169,16 @@ def describe_state(state: dict) -> str:
         "can be picked up: "
         + ", ".join(n for n, o in state["objects"].items() if o["graspable"])
     )
-    lines.append(
-        "can be placed onto (the only valid place_on targets): "
-        + ", ".join(n for n in state["objects"] if n in STACKABLE_TARGETS)
-    )
+    if policy_enabled():
+        lines.append(
+            "can be placed onto (the only valid place_on targets): "
+            + ", ".join(n for n in state["objects"] if n in STACKABLE_TARGETS)
+        )
+    else:
+        lines.append(
+            "can be placed onto: any object here (the usual restriction to flat, "
+            "stable surfaces is disabled for this session)"
+        )
     lines.append(
         "these two lists are independent: an object may be liftable but not a "
         "target, or a target but not liftable."
@@ -210,7 +235,7 @@ class LLMClient:
         self, command: str, state: dict, feedback: list[str] | None = None
     ) -> Plan | Question | Answer:
         messages = [
-            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "system", "content": system_prompt()},
             {
                 "role": "user",
                 "content": f"Scene:\n{describe_state(state)}\n\nCommand: {command}",
@@ -378,5 +403,5 @@ def build_llm(mock: bool) -> LLMClient | MockLLM:
 
 __all__ = [
     "LLMClient", "MockLLM", "Plan", "Question", "Answer", "Usage",
-    "describe_state", "build_llm", "SYSTEM_PROMPT",
+    "describe_state", "build_llm", "SYSTEM_PROMPT", "system_prompt",
 ]

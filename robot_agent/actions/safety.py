@@ -23,6 +23,33 @@ from .schema import (
     Safety,
 )
 
+# --- policy switch -------------------------------------------------------
+#
+# Two different kinds of check live in this module:
+#
+#   correctness - the action is impossible or malformed (no such object, gripper
+#                 already full, argument missing, target out of reach). Disabling
+#                 these would just crash the executor, so they always run.
+#   policy      - the action is possible but we would rather it did not happen
+#                 (stacking on something fragile, an object that will not balance,
+#                 anything irreversible). These are what --no-safety turns off.
+#
+# With policy off, classify() reports SAFE for everything, so nothing is gated
+# behind a confirmation and physics decides what happens.
+
+_POLICY_ENABLED = True
+
+
+def set_policy_enabled(enabled: bool) -> None:
+    """Enable or disable the policy checks. Called once at startup."""
+    global _POLICY_ENABLED
+    _POLICY_ENABLED = enabled
+
+
+def policy_enabled() -> bool:
+    return _POLICY_ENABLED
+
+
 # A surface must be flat and stable to stack on. Anything else is refused.
 STACKABLE_TARGETS = ("tray", "red_block", "green_block", "blue_block")
 
@@ -106,7 +133,7 @@ def check_preconditions(call: ActionCall, state: dict) -> list[str]:
         else:
             if not obj.get("graspable", True):
                 problems.append(f"{target} is fixed in place and cannot be picked up")
-            if obj["supporting"]:
+            if obj["supporting"] and _POLICY_ENABLED:
                 on_top = ", ".join(obj["supporting"])
                 problems.append(f"{target} has {on_top} on top of it")
             if not obj["on_table"]:
@@ -122,20 +149,23 @@ def check_preconditions(call: ActionCall, state: dict) -> list[str]:
         if obj is None:
             problems.append(f"there is no object called '{target}'")
         else:
-            if obj["fragile"]:
-                problems.append(f"{target} is fragile and is not a stable surface to stack on")
-            elif target not in STACKABLE_TARGETS:
-                problems.append(f"{target} is not a flat surface to stack on")
             if target == holding:
                 problems.append(f"cannot place {target} on itself")
-            elif holding is not None:
-                fit = stacking_overhang(state, holding, target)
-                if fit is not None:
-                    held_w, target_w = fit
+            elif _POLICY_ENABLED:
+                if obj["fragile"]:
                     problems.append(
-                        f"{holding} is {held_w:.2f} m across and {target} is only "
-                        f"{target_w:.2f} m across; it would not balance"
+                        f"{target} is fragile and is not a stable surface to stack on"
                     )
+                elif target not in STACKABLE_TARGETS:
+                    problems.append(f"{target} is not a flat surface to stack on")
+                elif holding is not None:
+                    fit = stacking_overhang(state, holding, target)
+                    if fit is not None:
+                        held_w, target_w = fit
+                        problems.append(
+                            f"{holding} is {held_w:.2f} m across and {target} is only "
+                            f"{target_w:.2f} m across; it would not balance"
+                        )
 
     elif name == "place_at":
         if holding is None:
@@ -176,6 +206,9 @@ def classify(call: ActionCall, state: dict) -> tuple[Safety, str]:
     so it names the object and the measured consequence.
     """
     name, args = call.name, call.args
+
+    if not _POLICY_ENABLED:
+        return Safety.SAFE, "safety policy disabled (--no-safety)"
 
     if name == "pick":
         obj = _obj(state, args.get("object", ""))
@@ -222,5 +255,6 @@ def classify(call: ActionCall, state: dict) -> tuple[Safety, str]:
 
 __all__ = [
     "check_preconditions", "classify", "reachable", "off_table", "stacking_overhang",
+    "set_policy_enabled", "policy_enabled",
     "overhang_m", "predict_push_end", "STACKABLE_TARGETS",
 ]

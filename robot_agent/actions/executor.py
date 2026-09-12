@@ -7,7 +7,7 @@ import math
 from typing import Callable
 
 from ..sim.backends import ArmBackend
-from .safety import check_preconditions, classify
+from .safety import check_preconditions, classify, policy_enabled
 from .schema import (
     ACTIONS,
     APPROACH_HEIGHT_M,
@@ -200,7 +200,7 @@ def validate_plan(plan: list[ActionCall], state: dict) -> list[str]:
             problems.append(f"step {i} ({call.name}): {reason}")
         current = _apply_effects(call, current)
 
-    if not problems and is_no_op(plan, state):
+    if not problems and policy_enabled() and is_no_op(plan, state):
         problems.append(
             "this plan would leave the scene exactly as it is; it does not achieve "
             "anything. Either propose a plan that actually changes something, or "

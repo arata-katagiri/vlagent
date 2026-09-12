@@ -190,3 +190,68 @@ def test_same_sized_blocks_can_be_stacked(state):
     state["gripper"]["holding"] = "red_block"
     state["objects"]["red_block"]["held"] = True
     assert check_preconditions(call("place_on", target="blue_block"), state) == []
+
+
+# --- the --no-safety switch ---------------------------------------------
+
+@pytest.fixture
+def unrestricted():
+    """Disable the policy checks for one test, then always restore them."""
+    from robot_agent.actions import safety as safety_module
+
+    safety_module.set_policy_enabled(False)
+    try:
+        yield
+    finally:
+        safety_module.set_policy_enabled(True)
+
+
+def test_policy_is_on_by_default():
+    from robot_agent.actions.safety import policy_enabled
+
+    assert policy_enabled() is True
+
+
+def test_unrestricted_allows_what_policy_refuses(state, unrestricted):
+    state["gripper"]["holding"] = "cup"
+    state["objects"]["cup"]["held"] = True
+    # fragile target, non-flat target, and an object that cannot balance
+    assert check_preconditions(call("place_on", target="glass"), state) == []
+    assert check_preconditions(call("place_on", target="red_block"), state) == []
+
+
+def test_unrestricted_classifies_everything_as_safe(state, unrestricted):
+    level, reason = classify(call("push", object="glass", direction="left", distance_m=0.3), state)
+    assert level is Safety.SAFE
+    assert "disabled" in reason
+
+
+def test_unrestricted_still_enforces_what_is_impossible(state, unrestricted):
+    """Correctness checks are not policy: without them the executor would crash."""
+    assert check_preconditions(call("pick", object="banana"), state)
+
+    state["gripper"]["holding"] = "cup"
+    assert check_preconditions(call("pick", object="red_block"), state)
+
+    assert check_preconditions(call("place_at", x_m=3.0, y_m=0.0), state)
+    assert check_preconditions(ActionCall(name="pick", args={}), state)
+
+
+def test_unrestricted_allows_picking_a_buried_object(state, unrestricted):
+    state["objects"]["red_block"]["supporting"] = ["green_block"]
+    assert check_preconditions(call("pick", object="red_block"), state) == []
+
+
+def test_unrestricted_does_not_block_a_no_op_plan(state, unrestricted):
+    from robot_agent.actions.executor import validate_plan
+
+    tray = state["objects"]["tray"]
+    red = state["objects"]["red_block"]
+    red["position_m"] = [tray["position_m"][0], tray["position_m"][1],
+                         round(tray["position_m"][2] + tray["half_extent_m"][2]
+                               + red["half_extent_m"][2], 4)]
+    red["on_top_of"] = "tray"
+    tray["supporting"] = ["red_block"]
+    assert validate_plan(
+        [call("pick", object="red_block"), call("place_on", target="tray")], state
+    ) == []

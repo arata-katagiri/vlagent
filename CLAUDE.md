@@ -176,6 +176,11 @@ All parameters carry units in their names and have explicit bounds.
 A question about the scene is not an action. "What is on the table?" is answered with the `answer`
 tool; turning it into a clarification question is a bug, not caution.
 
+`--no-safety` disables the policy layer for experimenting: no refusals, no confirmations, and the
+prompt drops the restrictions so the model stops refusing on its own. Correctness preconditions still
+apply. The default is on, and the demo must be recorded with it on -- the safety pattern is what
+section 3 scores as impossible in a chatbox.
+
 Safety rules:
 - Classification is **deterministic code in `actions/safety.py`**, never LLM judgment. The LLM cannot
   downgrade it. `classify` returns a `Safety` enum, so a typo cannot silently become "safe".
