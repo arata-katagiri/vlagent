@@ -70,10 +70,18 @@ def scene(state: dict) -> None:
             notes.append("[cyan]held[/cyan]")
         p = obj["position_m"]
         table.add_row(name, f"{p[0]:.2f}, {p[1]:.2f}, {p[2]:.2f}", "  ".join(notes))
-    holding = state["gripper"]["holding"] or "nothing"
+    arms = state.get("arms")
+    if arms:
+        footer = "\n" + "\n".join(
+            f"arm [bold]{k}[/bold]: base ({a['base_m'][0]:.2f}, {a['base_m'][1]:.2f}) m, "
+            f"holding [cyan]{a['holding'] or 'nothing'}[/cyan]"
+            for k, a in arms.items()
+        )
+    else:
+        footer = f"\ngripper: holding [cyan]{state['gripper']['holding'] or 'nothing'}[/cyan]"
     console.print(
         Panel(
-            Group(table, Text.from_markup(f"\ngripper: holding [cyan]{holding}[/cyan]")),
+            Group(table, Text.from_markup(footer)),
             title="scene",
             border_style="dim",
         )
@@ -82,14 +90,23 @@ def scene(state: dict) -> None:
 
 def plan(steps: list[ActionCall], levels: list[tuple[Safety, str]], summary: str) -> None:
     table = Table(show_header=True, header_style="dim", border_style="dim")
+    # The arm column only appears in a multi-arm scene, so the single-arm plan
+    # table is unchanged.
+    show_arm = any("arm" in s.args for s in steps)
     table.add_column("#", width=2, justify="right")
+    if show_arm:
+        table.add_column("arm", width=3)
     table.add_column("action")
     table.add_column("arguments")
     table.add_column("why")
     table.add_column("safety")
     for i, (step, (level, _)) in enumerate(zip(steps, levels), start=1):
-        args = ", ".join(f"{k}={v}" for k, v in step.args.items())
-        table.add_row(str(i), step.name, args, step.rationale, badge(level))
+        args = ", ".join(f"{k}={v}" for k, v in step.args.items() if k != "arm")
+        row = [str(i)]
+        if show_arm:
+            row.append(f"[bold]{step.args.get('arm', '-')}[/bold]")
+        row += [step.name, args, step.rationale, badge(level)]
+        table.add_row(*row)
     console.print(Panel(table, title=summary or "proposed plan", border_style="cyan"))
     if voice is not None and summary:
         voice.say(summary)
@@ -212,6 +229,52 @@ def rehearsal(skill, verdict) -> None:
     )
 
 
+# -- learned safety rules ---------------------------------------------------------
+def rule_code(rule, tags: dict | None = None) -> None:
+    from rich.syntax import Syntax  # noqa: PLC0415
+
+    head = f"[dim]{rule.doc}[/dim]\n"
+    if tags:
+        head += "[dim]tags:[/dim] " + "; ".join(f"{k}: {', '.join(v)}" for k, v in tags.items()) + "\n"
+    console.print(Panel(Group(Text.from_markup(head), Syntax(rule.code, "python", theme="monokai", line_numbers=True, word_wrap=True)),
+                        title=f"new safety rule: {rule.name}", border_style="red"))
+
+
+def rule_dry_run(rule, blocked: list[str], error: str | None = None) -> None:
+    if error:
+        body = Text.from_markup(f"[bold red]rule rejected:[/bold red] {error}")
+    elif blocked:
+        body = Text.from_markup("In the scene right now this rule would refuse:\n" + "\n".join(f"  - {b}" for b in blocked))
+    else:
+        body = Text.from_markup("[yellow]This rule refuses nothing in the scene right now.[/yellow] It may still matter later, or it may be too loose.")
+    console.print(Panel(body, title=f"dry run of {rule.name}", border_style="red" if (error or blocked) else "yellow"))
+
+
+def confirm_keep_rule(rule) -> bool:
+    try:
+        answer = Prompt.ask(f"  Keep [bold]{rule.name}[/bold] as a standing safety rule? (yes/no)", default="yes")
+    except (EOFError, KeyboardInterrupt):
+        console.print()
+        return False
+    return answer.strip().lower() in ("yes", "y")
+
+
+def rules(registry) -> None:
+    if not registry.rules and not registry.tags:
+        console.print(Panel(Text("No learned rules yet. State a policy, e.g. 'the cup is corrosive, keep it away from the glass'."),
+                            title="safety rules", border_style="dim"))
+        return
+    table = Table(show_header=True, header_style="dim", border_style="dim")
+    table.add_column("rule")
+    table.add_column("policy")
+    table.add_column("blocked", justify="right")
+    for r in registry.rules.values():
+        table.add_row(r.name, r.doc, str(r.blocks))
+    tags = "; ".join(f"{k}: {', '.join(v)}" for k, v in registry.tags.items() if v) or "none"
+    console.print(Panel(Group(table, Text.from_markup(f"\n[dim]tags:[/dim] {tags}")),
+                        title=f"learned safety rules ({len(registry.rules)}) in {registry.dir}", border_style="red"))
+
+
 def graph(registry) -> None:
     lines = registry.graph_lines()
     if not lines:
@@ -270,4 +333,5 @@ def skills(registry) -> None:
 
 __all__ = ["console", "banner", "scene", "plan", "rejected", "confirm",
            "step_result", "question", "answer", "report", "note", "badge",
-           "code", "rehearsal", "confirm_keep", "confirm_revise", "skills", "graph", "badge_str"]
+           "code", "rehearsal", "confirm_keep", "confirm_revise", "skills", "graph", "badge_str",
+           "rule_code", "rule_dry_run", "confirm_keep_rule", "rules"]

@@ -71,3 +71,37 @@ def check(before, after, object, angle_deg=90, **_):
 """
 
 __all__ = ["AUTHORING_GUIDE"]
+
+RULE_GUIDE = """
+Writing a new safety rule:
+- When the user states a policy ("the acid is dangerous", "never lift the flask
+  more than 5 cm", "keep hot things away from the paper"), call define_rule.
+  A rule is deterministic code that runs on every plan and every learned skill
+  from then on. Rules can only ADD refusals or RAISE a level; they can never
+  loosen anything. Key rules on tags (set them with tags_json), not on names,
+  so they carry across scenes.
+- The code must define check(before, after, action, args) -> a short reason to
+  refuse, or None. It may define level(before, after, action, args) -> "caution"
+  or "irreversible" (or (level, reason)), or None. `before` is the scene now and
+  `after` the predicted or measured scene after the action; each object has
+  ["position_m"], ["tags"], ["on_table"], ["held"], ["on_top_of"], and
+  gripper["holding"]. `action` is the action or skill name, `args` its arguments.
+  math and dist(a, b) are available; no imports.
+Example:
+def check(before, after, action, args):
+    for name, o in after["objects"].items():
+        if "corrosive" not in o["tags"] or not o["on_table"]:
+            continue
+        for other, p in after["objects"].items():
+            if other != name and "water" in p["tags"] and p["on_table"]:
+                d = dist(o["position_m"][:2], p["position_m"][:2])
+                if d < 0.10:
+                    return f"{name} would be {d:.2f} m from {other}; corrosive and water stay 0.10 m apart"
+    return None
+
+def level(before, after, action, args):
+    o = args.get("object")
+    if o and "corrosive" in after["objects"].get(o, {}).get("tags", []):
+        return "caution", f"{o} is corrosive; handle gently"
+    return None
+"""

@@ -137,6 +137,11 @@ def _rest_z(obj: dict) -> float:
     return _T["top_z"] + half_height(obj)
 
 
+# Scenario decoration: callables that receive the finished spec before it is
+# compiled (backdrops, fixed props). Scenarios append to this in activate().
+DECORATORS: list = []
+
+
 def build_spec() -> mujoco.MjSpec:
     """Assemble the full scene spec (Panda + table + objects + welds)."""
     spec = mujoco.MjSpec.from_file(panda_xml_path().as_posix())
@@ -234,6 +239,9 @@ def build_spec() -> mujoco.MjSpec:
     cam.pos = [1.78, -1.30, 1.52]
     cam.mode = mujoco.mjtCamLight.mjCAMLIGHT_TARGETBODY
     cam.targetbody = "table"
+
+    for decorate in DECORATORS:
+        decorate(spec)
 
     return spec
 

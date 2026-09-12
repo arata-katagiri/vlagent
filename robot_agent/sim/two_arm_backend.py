@@ -168,11 +168,54 @@ class TwoArms:
         self.a = ArmHandle(model, data, ARMS["a"]["prefix"], sync)
         self.b = ArmHandle(model, data, ARMS["b"]["prefix"], sync)
 
+    # -- routing ---------------------------------------------------------
+    def for_arm(self, name: str | None):
+        """The handle for a named arm. The executor calls this per step.
+
+        None falls back to arm A rather than raising: a plan that omits `arm`
+        has already been rejected by the precondition checks, so reaching here
+        without one means a code path that predates two arms.
+        """
+        if name is None:
+            return self.a
+        try:
+            return getattr(self, str(name))
+        except AttributeError:
+            raise KeyError(f"no arm called {name!r}; expected one of a, b") from None
+
     def object_pos(self, name: str) -> np.ndarray:
         return self.data.body(name).xpos.copy()
 
     def nearest_arm(self, x: float, y: float) -> ArmHandle:
         return self.a if self.a.reach_from_base(x, y) <= self.b.reach_from_base(x, y) else self.b
+
+    # -- ArmBackend passthrough (arm A), so un-routed callers still work -----
+    def move_to(self, *a, **kw):
+        return self.a.move_to(*a, **kw)
+
+    def open_gripper(self) -> None:
+        self.a.open_gripper()
+
+    def close_gripper(self) -> None:
+        self.a.close_gripper()
+
+    def attach(self, obj_name: str) -> None:
+        self.a.attach(obj_name)
+
+    def detach(self) -> None:
+        self.a.detach()
+
+    def home(self) -> bool:
+        return self.a.home()
+
+    @property
+    def sync(self):
+        return self.a.sync
+
+    @sync.setter
+    def sync(self, fn) -> None:
+        self.a.sync = fn
+        self.b.sync = fn
 
 
 __all__ = ["ArmHandle", "TwoArms"]

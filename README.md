@@ -108,7 +108,29 @@ you > knock the cup over
 ```
 
 `skills` lists the library; `forget <name>` removes one; `--skills-dir` chooses where they live.
+For a live picture, run `python -m robot_agent.app.graph_window` in a second terminal: a small window that redraws whenever a skill is added, revised or forgotten. Cosmetic only; it never touches the simulator.
 Learned skills can call each other through `arm.skill(name, **args)`.
+
+## The browser UI
+
+```bash
+python -m robot_agent.app.main --web --safety            # then open http://127.0.0.1:8000
+python -m robot_agent.app.main --web --scene two_arm     # any scene works; pick the camera on the page
+```
+
+Four boxes. The **simulation**, streamed from the same render hook the recorder uses, with a camera
+picker and a Stop button (Ctrl-C for the running step; a rehearsal restores the world). The
+**library**, switchable between learned actions and learned safety rules, each row with its level and
+whether the world or the model verified it; click a row to see its code, ✕ to forget it. **Talk to the
+arm**, where the agent's plan summaries, questions, answers and results appear and every confirmation
+is a pair of single-use buttons that default to no; a voice toggle uses the browser's own speech
+recognition, or dictate into the box with Wispr Flow; a speak toggle reads replies aloud. And **what
+the agent is doing**: the terminal's own rendering, captured as HTML, so plan tables, generated code
+and rehearsal verdicts look exactly as they do in the terminal.
+
+The server runs on one daemon thread that only reads the latest JPEG and moves JSON between queues;
+the agent loop, physics and every prompt stay on the main thread, as in the REPL. Needs `fastapi` and
+`uvicorn[standard]`; the terminal UI does not.
 
 ## Setup
 

@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import copy
 import math
+from pathlib import Path
 
 from ..actions import safety
 from ..actions.schema import DIRECTIONS, ActionCall, Safety
@@ -132,6 +133,65 @@ def classify_hook(call: ActionCall, state: dict):
 
 # -------------------------------------------------------------- activation
 
+# -------------------------------------------------------------- decoration
+# The chemistry lab from mujoco-scene-editor (assets/scene_editor, MIT): a
+# human-scale room of primitives. We use its furniture as a backdrop behind the
+# arm and a few of its props as fixed decoration along the far edge of our
+# table. Its bench, stool, floor and lights are dropped; ours stay.
+CHEM_XML = Path(__file__).resolve().parents[2] / "assets" / "scene_editor" / "scene_chemistry_lab.xml"
+BACKDROP_DROP = ("bench", "lab_stool", "light_fixture_1", "light_fixture_2", "fire_extinguisher",
+                 "microscope", "balance_scale", "test_tube_rack", "beaker", "erlenmeyer_flask",
+                 "graduated_cylinder", "bunsen_burner", "waste_bin", "rolling_cart")
+BACKDROP_YAW_DEG = 225.0                 # their back counter ends up behind the arm, back-left of the camera
+BACKDROP_POS = (1.4, -1.4, 0.0)
+PROPS = {                                # fixed props on our table's far strip (x >= 0.70 is beyond the tray)
+    "microscope": (0.70, 0.31),
+    "erlenmeyer_flask": (0.76, -0.10),
+    "beaker": (0.76, -0.26),
+    "bunsen_burner": (0.76, 0.12),
+}
+
+
+def _chem_spec(keep: set[str] | None = None, drop: tuple[str, ...] = ()):
+    """A fresh copy of the chemistry spec with bodies removed and no floor/lights."""
+    import mujoco  # noqa: PLC0415
+
+    spec = mujoco.MjSpec.from_file(CHEM_XML.as_posix())
+    for body in list(spec.bodies):
+        if not body.name or body.name == "world":
+            continue
+        if keep is not None and body.name not in keep:
+            spec.delete(body)
+        elif body.name in drop:
+            spec.delete(body)
+    for geom in list(spec.worldbody.geoms):
+        if geom.type == mujoco.mjtGeom.mjGEOM_PLANE:
+            spec.delete(geom)
+    for light in list(spec.worldbody.lights):
+        spec.delete(light)
+    return spec
+
+
+def decorate(spec) -> None:
+    """Attach the backdrop and the props into the live scene spec."""
+    import math  # noqa: PLC0415
+
+    if not CHEM_XML.exists():
+        return
+    world = spec.worldbody
+    half = math.radians(BACKDROP_YAW_DEG) / 2
+    frame = world.add_frame(pos=list(BACKDROP_POS), quat=[math.cos(half), 0, 0, math.sin(half)])
+    spec.attach(_chem_spec(drop=BACKDROP_DROP), prefix="lab_", frame=frame)
+    for name, (x, y) in PROPS.items():
+        child = _chem_spec(keep={name})
+        for body in child.bodies:
+            if body.name == name:
+                for joint in list(body.joints):
+                    child.delete(joint)          # props are fixed decoration
+        f = world.add_frame(pos=[x, y, scene.TABLE_BOUNDS_M["top_z"]])
+        spec.attach(child, prefix=f"prop_{name}_", frame=f)
+
+
 def activate():
     """Swap the lab objects into the live scene registries and install the
     policy. Returns restore(), which puts the default scene back."""
@@ -153,6 +213,8 @@ def activate():
     scene.ITEMS["tray"] = tray
 
     safety.STACKABLE_TARGETS = ("tray", "red_sample", "green_sample", "blue_sample")
+    if decorate not in scene.DECORATORS:
+        scene.DECORATORS.append(decorate)
     safety.PRECONDITION_HOOKS.append(precondition_hook)
     safety.CLASSIFY_HOOKS.append(classify_hook)
     _llm.SCENARIO_RULES.append(LAB_RULES)
@@ -164,6 +226,8 @@ def activate():
         scene.ITEMS.update(saved["items"])
         scene.GRASPABLE = saved["graspable"]
         safety.STACKABLE_TARGETS = saved["stackable"]
+        if decorate in scene.DECORATORS:
+            scene.DECORATORS.remove(decorate)
         if precondition_hook in safety.PRECONDITION_HOOKS:
             safety.PRECONDITION_HOOKS.remove(precondition_hook)
         if classify_hook in safety.CLASSIFY_HOOKS:

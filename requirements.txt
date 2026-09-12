@@ -14,3 +14,10 @@ pytest==9.1.1
 # to text costs nothing and works with no network.
 mlx-whisper==0.4.3
 sounddevice==0.5.6
+
+# Chess scenario (optional; robot_agent/sim/chess_scene.py, not wired into the app yet).
+# Legal-move checks only; the scene builds and renders without it.
+chess==1.11.2
+matplotlib>=3.8  # architecture diagram (python -m robot_agent.architecture)
+fastapi>=0.115  # web UI (--web)
+uvicorn[standard]>=0.30  # web UI (--web)

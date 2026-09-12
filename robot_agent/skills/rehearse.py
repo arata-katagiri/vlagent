@@ -136,7 +136,24 @@ def verify_effect(skill: Skill, args: dict, before: dict, after: dict, metrics: 
     return True, "", False
 
 
-# -- world snapshot ---------------------------------------------------------
+# -- arms and world snapshot -------------------------------------------------
+def handles(backend) -> list:
+    """Every arm over the world: [a, b] for the two-arm backend, else [backend]."""
+    if hasattr(backend, "for_arm"):
+        return [h for h in (getattr(backend, "a", None), getattr(backend, "b", None)) if h is not None]
+    return [backend]
+
+
+def resolve(backend, args: dict):
+    """(handle, args without 'arm'). A learned skill runs on one arm; the step's
+    `arm` field picks it and must not reach run(arm, ...) as a keyword."""
+    args = dict(args or {})
+    which = args.pop("arm", None)
+    if hasattr(backend, "for_arm"):
+        return backend.for_arm(which), args
+    return backend, args
+
+
 def snapshot(backend) -> dict:
     if hasattr(backend, "data"):
         d, m = backend.data, backend.model
@@ -145,7 +162,8 @@ def snapshot(backend) -> dict:
             "qpos": d.qpos.copy(), "qvel": d.qvel.copy(), "act": d.act.copy(),
             "ctrl": d.ctrl.copy(), "time": float(d.time),
             "eq_active": d.eq_active.copy(), "eq_data": m.eq_data.copy(),
-            "held": backend.held, "drift": getattr(backend, "drift_m", 0.0),
+            "held": [getattr(h, "held", None) for h in handles(backend)],
+            "drift": [getattr(h, "drift_m", 0.0) for h in handles(backend)],
         }
     return {"physics": False, "state": copy.deepcopy(backend.state), "held": getattr(backend, "held", None)}
 
@@ -158,12 +176,17 @@ def restore(backend, snap: dict) -> None:
         d.qpos[:] = snap["qpos"]; d.qvel[:] = snap["qvel"]; d.act[:] = snap["act"]
         d.ctrl[:] = snap["ctrl"]; d.time = snap["time"]
         d.eq_active[:] = snap["eq_active"]; m.eq_data[:] = snap["eq_data"]
-        backend.held = snap["held"]
-        if hasattr(backend, "drift_m"):
-            backend.drift_m = snap["drift"]
         mujoco.mj_forward(m, d)
-        backend.configuration.update(d.qpos)
-        backend.sync()
+        for h, held, drift in zip(handles(backend), snap["held"], snap["drift"]):
+            h.held = held
+            if hasattr(h, "drift_m"):
+                h.drift_m = drift
+            cfg = getattr(h, "configuration", None)
+            if cfg is not None:
+                cfg.update(d.qpos)
+        sync = getattr(backend, "sync", None) or getattr(handles(backend)[0], "sync", None)
+        if sync:
+            sync()
     else:
         backend.state.clear()
         backend.state.update(copy.deepcopy(snap["state"]))
@@ -233,9 +256,10 @@ def rehearse(skill: Skill, args: dict, backend, get_state, registry=None,
     except SkillCodeError as exc:
         return Verdict(False, f"code rejected: {exc}", error=str(exc))
 
+    handle, args = resolve(backend, args)
     snap = snapshot(backend)
     before = observe(backend, get_state)
-    arm = Arm(backend, get_state, budget_s=budget_s, registry=registry)
+    arm = Arm(handle, get_state, budget_s=budget_s, registry=registry)
     error = None
     stopped = False
     try:
@@ -283,6 +307,18 @@ def rehearse(skill: Skill, args: dict, backend, get_state, registry=None,
         return Verdict(False, f"effect not achieved: {why}", metrics=metrics, verified=verified)
     world_note = why if verified else ""
 
+    # Learned safety rules judge the measured after-state (policy on only).
+    from ..actions.safety import policy_enabled  # noqa: PLC0415
+    from .rules import LEVEL_RANK, RULES  # noqa: PLC0415
+
+    raised = None
+    if policy_enabled() and RULES.rules:
+        broken = RULES.check(before, after, skill.name, args)
+        if broken:
+            metrics["rules_broken"] = broken
+            return Verdict(False, "; ".join(broken), metrics=metrics, verified=True)
+        raised = RULES.level(before, after, skill.name, args)
+
     if fns["check"] is not None:
         try:
             result = fns["check"](before, after, **args)
@@ -301,9 +337,11 @@ def rehearse(skill: Skill, args: dict, backend, get_state, registry=None,
         return Verdict(False, f"the skill ended still holding {metrics['held_after']}; release before returning", metrics=metrics, verified=verified)
 
     level, safety_why = classify(metrics)
+    if raised is not None and LEVEL_RANK[raised[0]] > LEVEL_RANK[level]:
+        level, safety_why = raised
     reason = f"{world_note}; {safety_why}" if world_note else safety_why
     return Verdict(True, reason, level=level, metrics=metrics, verified=verified)
 
 
 __all__ = ["rehearse", "Verdict", "snapshot", "restore", "observe", "measure", "classify",
-           "verify_effect", "edge_distance"]
+           "verify_effect", "edge_distance", "resolve", "handles"]

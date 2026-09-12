@@ -56,8 +56,10 @@ class Arm:
             self._dt = float(backend.model.opt.timestep)
             self._mink = backend._mink
             m = backend.model
+            prefix = getattr(backend, "prefix", "")      # "a_" / "b_" in the two-arm scene
             self._hand_ids = {i for i in range(m.nbody)
-                              if m.body(i).name in ("hand",) or "finger" in m.body(i).name}
+                              if m.body(i).name == f"{prefix}hand"
+                              or (m.body(i).name.startswith(prefix) and "finger" in m.body(i).name)}
             for name in self._get_state()["objects"]:
                 bid = mujoco.mj_name2id(m, mujoco.mjtObj.mjOBJ_BODY, name)
                 if bid >= 0:
@@ -65,18 +67,23 @@ class Arm:
 
     # ------------------------------------------------------------ perception
     def state(self) -> dict:
+        """The full scene dict: objects, gripper, table bounds."""
         return self._get_state()
 
     def objects(self) -> list[str]:
+        """Names of the movable objects."""
         return [n for n, o in self.state()["objects"].items() if o.get("graspable", True)]
 
     def pos(self, name: str) -> list[float]:
+        """World xyz of an object's centre, metres."""
         return list(self._obj(name)["position_m"])
 
     def half(self, name: str) -> list[float]:
+        """Half extents [hx, hy, hz] of an object."""
         return list(self._obj(name).get("half_extent_m", [0.02, 0.02, 0.02]))
 
     def top(self, name: str) -> float:
+        """Height of an object's top surface."""
         return self.pos(name)[2] + self.half(name)[2]
 
     def yaw(self, name: str) -> float:
@@ -95,17 +102,21 @@ class Arm:
         return math.degrees(math.acos(max(-1.0, min(1.0, 1 - 2 * (x * x + y * y)))))
 
     def gripper_pos(self) -> list[float]:
+        """World xyz of the tool centre point, between the fingertips."""
         return list(self.state()["gripper"]["position_m"])
 
     def holding(self) -> str | None:
+        """Name of the object welded to the hand, or None."""
         return self.state()["gripper"]["holding"]
 
     def table(self) -> dict:
+        """Table bounds x_min/x_max/y_min/y_max and top_z."""
         return dict(self.state()["table_bounds_m"])
 
     # --------------------------------------------------------------- motion
     def move_to(self, xyz, yaw_deg: float = 0.0, tilt_deg: float = 0.0,
                 seconds: float | None = None) -> bool:
+        """Straight line to xyz with yaw about vertical and tilt from top-down; seconds sets speed."""
         goal = np.asarray(xyz, dtype=float)
         if not self._physics:
             self._charge(seconds or 0.5)
@@ -167,6 +178,7 @@ class Arm:
         return True
 
     def open(self) -> None:
+        """Open the fingers."""
         self._charge(0.12)
         self._closed = False
         self._b.open_gripper()
@@ -174,6 +186,7 @@ class Arm:
         self._sample(force=True)
 
     def close(self) -> None:
+        """Close the fingers (no weld)."""
         self._charge(0.12)
         self._closed = True
         self._b.close_gripper()
@@ -191,6 +204,7 @@ class Arm:
         return name
 
     def release(self) -> None:
+        """Drop the weld and open; the object keeps its velocity."""
         self._charge(0.2)
         self._closed = False
         self._b.detach()
@@ -198,11 +212,13 @@ class Arm:
         self._sample(force=True)
 
     def home(self) -> bool:
+        """Return to the rest pose."""
         self._charge(1.0)
         self._yaw, self._tilt = 0.0, 0.0
         return bool(self._b.home())
 
     def wait(self, seconds: float) -> None:
+        """Let physics run for a while without moving."""
         self._charge(seconds)
         if self._physics:
             self._b._step_physics(max(1, int(seconds / self._dt)))
@@ -210,6 +226,7 @@ class Arm:
 
     # ---------------------------------------------------------- composition
     def skill(self, name: str, **args):
+        """Call another learned skill (recorded as a composition edge)."""
         if self._registry is None or name not in self._registry:
             raise RuntimeError(f"no skill called '{name}'")
         self.calls.append(name)
@@ -231,7 +248,10 @@ class Arm:
             raise BudgetExceeded(f"skill exceeded its {self.budget_s:.0f} s budget of simulated time")
 
     def _site_pos(self) -> np.ndarray:
-        return self._b.data.site(self._b.site_id).xpos.copy()
+        key = getattr(self._b, "site_id", None)
+        if key is None:
+            key = self._b.site_name          # two-arm handles name their grasp site
+        return self._b.data.site(key).xpos.copy()
 
     def _rotation(self, yaw_deg: float, tilt_deg: float):
         SO3 = self._mink.SO3

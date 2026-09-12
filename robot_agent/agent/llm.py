@@ -93,18 +93,43 @@ SYSTEM_PROMPT = _RULES.format(actions=describe_actions())
 # Extra rule paragraphs a scenario adds to the system prompt (see sim/lab_scene.py).
 SCENARIO_RULES: list[str] = []
 
+# Added only when the loaded scene has more than one arm.
+_ARM_RULES = """
+
+There are two robot arms at this table, `a` and `b`, facing each other. Every
+physical step must say which arm performs it.
+
+- Each arm reaches about 0.25-0.80 m from its own base, so neither can reach the
+  whole table. The scene lists, for each object, which arms can reach it.
+- Choose the arm that can reach the object. If only one arm can, that is the arm.
+- To move something from one arm's side to the other, hand it over: the first arm
+  places it on the tray in the middle, which both arms can reach, then the second
+  arm picks it up from there. Plan both halves as ordinary steps.
+- Each arm has its own gripper and holds at most one object. One arm holding
+  something does not stop the other from working.
+- The arms share one workspace and do not avoid each other. Send an arm `home`
+  before the other reaches into the middle.
+"""
+
 
 def system_prompt() -> str:
     """Rules + live catalogue (built-ins and learned skills) + how to write a skill,
     for the current policy setting."""
-    from ..skills.prompt import AUTHORING_GUIDE  # noqa: PLC0415
+    from ..skills.prompt import AUTHORING_GUIDE, RULE_GUIDE  # noqa: PLC0415
     from ..skills.registry import REGISTRY  # noqa: PLC0415
+    from ..skills.rules import RULES  # noqa: PLC0415
 
     actions = describe_actions()
     learned = REGISTRY.describe()
     if learned:
         actions += "\n\n" + learned
-    base = _RULES.format(actions=actions) + "".join(SCENARIO_RULES) + AUTHORING_GUIDE
+    from ..actions.schema import multi_arm  # noqa: PLC0415
+
+    base = _RULES.format(actions=actions)
+    if multi_arm():
+        base += _ARM_RULES
+    policy = RULES.describe()
+    base += "".join(SCENARIO_RULES) + ("\n" + policy + "\n" if policy else "") + AUTHORING_GUIDE + RULE_GUIDE
     if policy_enabled():
         return base
     return base + "\n" + _UNRESTRICTED
@@ -153,6 +178,33 @@ class SkillProposal:
     effect_value: str = ""
     derived_from: str = ""
     similar_to: list[str] = field(default_factory=list)
+
+
+@dataclass
+class RuleProposal:
+    """The model wants to add a safety rule rather than plan."""
+
+    name: str
+    doc: str
+    code: str
+    tags: dict
+    summary: str = ""
+
+
+def _rule_from_args(raw: dict) -> RuleProposal:
+    try:
+        tags = json.loads(raw.get("tags_json") or "{}")
+        if not isinstance(tags, dict):
+            tags = {}
+    except json.JSONDecodeError:
+        tags = {}
+    return RuleProposal(
+        name=str(raw.get("name", "")).strip().lower().replace(" ", "_"),
+        doc=str(raw.get("doc", "")),
+        code=str(raw.get("code", "")),
+        tags={str(k): [str(t) for t in (v if isinstance(v, list) else [v])] for k, v in tags.items()},
+        summary=str(raw.get("summary", "")),
+    )
 
 
 def _skill_from_args(raw: dict) -> SkillProposal:
@@ -218,14 +270,27 @@ def describe_state(state: dict) -> str:
     Deliberately terse: positions to the centimetre, and only the facts that
     change what the agent may do.
     """
+    from ..actions.safety import base_of, reachable  # noqa: PLC0415
+
     t = state["table_bounds_m"]
+    arms = state.get("arms")
     lines = [
         f"table: x {t['x_min']:.2f}..{t['x_max']:.2f} m, "
         f"y {t['y_min']:.2f}..{t['y_max']:.2f} m, top at z {t['top_z']:.2f} m",
-        f"gripper: at {_xyz(state['gripper']['position_m'])}, "
-        f"holding {state['gripper']['holding'] or 'nothing'}",
-        "objects:",
     ]
+    if arms:
+        for key, arm in arms.items():
+            bx, by = arm["base_m"][:2]
+            lines.append(
+                f"arm {key}: base at ({bx:.2f}, {by:.2f}) m, gripper at "
+                f"{_xyz(arm['position_m'])}, holding {arm['holding'] or 'nothing'}"
+            )
+    else:
+        lines.append(
+            f"gripper: at {_xyz(state['gripper']['position_m'])}, "
+            f"holding {state['gripper']['holding'] or 'nothing'}"
+        )
+    lines.append("objects:")
     for name, obj in state["objects"].items():
         tags = []
         if obj["fragile"]:
@@ -240,6 +305,13 @@ def describe_state(state: dict) -> str:
             tags.append("currently held")
         if not obj["on_table"] and not obj["held"]:
             tags.append("off the table")
+        if arms:
+            x, y = obj["position_m"][0], obj["position_m"][1]
+            who = [k for k in arms if reachable(x, y, base_of(state, k))]
+            tags.append(
+                "reachable by " + (" and ".join(f"arm {k}" for k in who) if who
+                                   else "neither arm")
+            )
         suffix = f" [{'; '.join(tags)}]" if tags else ""
         lines.append(f"  {name} ({obj['color']}) at {_xyz(obj['position_m'])}{suffix}")
 
@@ -386,6 +458,8 @@ class LLMClient:
             return Answer(text=str(args.get("text", "")))
         if call.function.name == "define_skill":
             return _skill_from_args(args)
+        if call.function.name == "define_rule":
+            return _rule_from_args(args)
         return Plan(steps=_steps_from_args(args), summary=str(args.get("summary", "")))
 
 

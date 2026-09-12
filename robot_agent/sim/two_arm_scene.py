@@ -17,7 +17,7 @@ import math
 import mujoco
 import numpy as np
 
-from .scene import OBJECTS, TCP_OFFSET_M, half_height, panda_xml_path
+from .scene import OBJECTS, TCP_OFFSET_M, footprint, half_height, panda_xml_path
 
 CAMERA_NAME = "demo"
 GRASP_SITE = "grasp_site"  # per arm: f"{prefix}{GRASP_SITE}"
@@ -30,15 +30,19 @@ HAND_BODY = "hand"          # per arm: f"{prefix}{HAND_BODY}"
 HOME_QPOS = np.array([0.0, -0.785, 0.0, -2.356, 0.0, 1.571, 0.785, 0.04, 0.04])
 GRIPPER_OPEN_CTRL = 255.0
 
+# 1.25 m apart, not 1.05. Each arm reaches 0.80 m from its own base, so a closer
+# spacing leaves both arms able to reach the whole table and the choice of arm
+# never matters. At 1.25 m each end of the table belongs to exactly one arm and
+# only the middle is shared, which is what makes a hand-off necessary.
 ARMS: dict[str, dict] = {
     "a": dict(prefix="a_", base=(0.0, 0.0, 0.0), yaw=0.0),
-    "b": dict(prefix="b_", base=(1.05, 0.0, 0.0), yaw=math.pi),
+    "b": dict(prefix="b_", base=(1.25, 0.0, 0.0), yaw=math.pi),
 }
 
 # Table between the bases. Both arms reach 0.25-0.80 m radially from their own
 # base, so x in [0.30, 0.75] is inside both envelopes along the centre line.
 TABLE_BOUNDS_M: dict[str, float] = {
-    "x_min": 0.30, "x_max": 0.75, "y_min": -0.38, "y_max": 0.38, "top_z": 0.40,
+    "x_min": 0.30, "x_max": 0.95, "y_min": -0.38, "y_max": 0.38, "top_z": 0.40,
 }
 _T = TABLE_BOUNDS_M
 _CX = 0.5 * (_T["x_min"] + _T["x_max"])
@@ -46,14 +50,16 @@ _CY = 0.5 * (_T["y_min"] + _T["y_max"])
 _HX = 0.5 * (_T["x_max"] - _T["x_min"])
 _HY = 0.5 * (_T["y_max"] - _T["y_min"])
 
-# Same objects as the single-arm scene, re-laid out: blocks on A's side, cups on
-# B's side, the tray in the middle as the hand-off zone.
+# Same objects as the single-arm scene, re-laid out so each end of the table is
+# exclusive: the three blocks sit inside arm A's envelope and outside arm B's,
+# the cup and glass the other way round. The tray in the middle is the only spot
+# both arms can reach, so moving anything across the table means handing it over.
 LAYOUT: dict[str, tuple[float, float]] = {
-    "red_block": (0.40, -0.16),
-    "green_block": (0.42, 0.02),
-    "blue_block": (0.40, 0.20),
-    "cup": (0.66, -0.20),
-    "glass": (0.64, 0.22),
+    "red_block": (0.36, -0.14),
+    "green_block": (0.38, 0.02),
+    "blue_block": (0.36, 0.18),
+    "cup": (0.89, -0.18),
+    "glass": (0.87, 0.20),
 }
 OBJECTS2: dict[str, dict] = {
     name: dict(OBJECTS[name], pos=(x, y, 0.0)) for name, (x, y) in LAYOUT.items()
@@ -62,6 +68,17 @@ GRASPABLE2 = tuple(n for n, o in OBJECTS2.items() if o["graspable"])
 TRAY2 = dict(
     half=(0.09, 0.09, 0.006), rgba=(0.30, 0.55, 0.65, 1.0),
     pos=(_CX, _CY, _T["top_z"] + 0.006),
+)
+
+
+# Everything the agent can refer to, including the fixed tray in the middle.
+ITEMS2: dict[str, dict] = dict(
+    OBJECTS2,
+    tray=dict(
+        kind="box", half=TRAY2["half"], rgba=TRAY2["rgba"], pos=TRAY2["pos"],
+        color="teal", fragile=False, graspable=False,
+        aliases=("the tray", "the middle", "somewhere safe"),
+    ),
 )
 
 
@@ -215,7 +232,8 @@ def settle(model, data, seconds: float = 0.5) -> None:
 
 __all__ = [
     "ARMS", "CAMERA_NAME", "GRASP_SITE", "HAND_BODY", "HOME_QPOS", "TABLE_BOUNDS_M",
-    "OBJECTS2", "GRASPABLE2", "TRAY2", "LAYOUT", "rest_z",
+    "OBJECTS2", "ITEMS2", "GRASPABLE2", "TRAY2", "LAYOUT", "rest_z",
     "build_two_arm_spec", "build_two_arm_scene", "reset", "settle",
     "object_qposadr", "arm_joint_qposadr", "arm_actuator_ids",
+    "footprint", "half_height",
 ]

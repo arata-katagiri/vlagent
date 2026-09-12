@@ -1,0 +1,196 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>VLAgent</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+  :root { --bg:#0f1115; --panel:#171a21; --line:#2a2f3a; --text:#e6e6e6; --dim:#9aa3b2; --accent:#7c4dff;
+          --green:#43a047; --red:#e53935; --yellow:#fdd835; --cyan:#26c6da; --mono:ui-monospace,Menlo,monospace; }
+  * { box-sizing:border-box } html,body { height:100%; margin:0 }
+  body { background:var(--bg); color:var(--text); font:14px/1.4 system-ui,-apple-system,sans-serif;
+         display:grid; gap:10px; padding:10px;
+         grid-template-columns: 2fr 2fr 1.25fr;
+         grid-template-rows: auto minmax(0,1fr) minmax(0,1.4fr) minmax(0,1.1fr);
+         grid-template-areas: "hdr hdr hdr" "sim sim lib" "sim sim chat" "out out out"; }
+  header { grid-area:hdr; display:flex; align-items:center; gap:14px; padding:4px 6px }
+  header h1 { font-size:16px; margin:0; letter-spacing:.3px } header .meta { color:var(--dim); font-size:12px }
+  .box { background:var(--panel); border:1px solid var(--line); border-radius:10px; display:flex; flex-direction:column; min-height:0 }
+  .box > .bar { display:flex; align-items:center; gap:8px; padding:8px 10px; border-bottom:1px solid var(--line); font-size:12px; color:var(--dim) }
+  .box > .bar b { color:var(--text); font-size:13px; margin-right:auto }
+  #sim { grid-area:sim } #lib { grid-area:lib } #chat { grid-area:chat } #out { grid-area:out }
+  #sim .body { flex:1; display:flex; align-items:center; justify-content:center; background:#000; border-radius:0 0 10px 10px; overflow:hidden }
+  #sim img { max-width:100%; max-height:100%; object-fit:contain }
+  select, button, input { font:inherit; color:var(--text); background:#0f1115; border:1px solid var(--line); border-radius:6px; padding:5px 9px }
+  button { cursor:pointer } button:hover { border-color:var(--accent) }
+  button.primary { background:var(--accent); border-color:var(--accent) } button.danger { border-color:var(--red); color:#ff8a80 }
+  button.toggle.on { background:#26323f; border-color:var(--cyan) }
+  .list { overflow:auto; padding:6px; flex:1 }
+  .row { display:flex; gap:8px; align-items:center; padding:6px 8px; border-radius:6px; cursor:pointer; font-size:12.5px }
+  .row:hover { background:#1f2430 } .row .name { font-family:var(--mono); color:var(--text) } .row .meta { color:var(--dim); flex:1; overflow:hidden; text-overflow:ellipsis; white-space:nowrap }
+  .badge { font-size:10.5px; padding:1px 6px; border-radius:10px; border:1px solid var(--line); color:var(--dim) }
+  .badge.safe { color:#9ccc65; border-color:#33691e } .badge.caution { color:var(--yellow); border-color:#8a6d00 } .badge.irreversible { color:#ff8a80; border-color:#7f0000 }
+  .badge.verified { color:var(--cyan); border-color:#00606b } .badge.stale { color:var(--yellow) }
+  #messages { flex:1; overflow:auto; padding:10px; display:flex; flex-direction:column; gap:8px }
+  .msg { max-width:92%; padding:8px 11px; border-radius:12px; white-space:pre-wrap; font-size:13.5px }
+  .msg.user { align-self:flex-end; background:#2b2540; border:1px solid #4a3d7a } .msg.agent { align-self:flex-start; background:#1f2430; border:1px solid var(--line) }
+  .msg.bad { border-color:#7f0000 } .msg.good { border-color:#33691e }
+  .prompt { align-self:stretch; background:#2a1e1e; border:1px solid #7f0000; border-radius:10px; padding:10px; font-size:13px }
+  .prompt.soft { background:#1e2a1e; border-color:#33691e } .prompt .btns { display:flex; gap:8px; margin-top:8px } .prompt.done { opacity:.55 }
+  #compose { display:flex; gap:6px; padding:8px; border-top:1px solid var(--line) }
+  #compose input { flex:1 } #compose input:focus { outline:none; border-color:var(--accent) }
+  #outbody { flex:1; overflow:auto; padding:8px 12px; font-family:var(--mono); font-size:11.5px; line-height:1.35 }
+  pre.rich { margin:0 0 6px 0; white-space:pre-wrap; word-break:break-word }
+  .hint { color:var(--dim); font-size:12px; padding:10px }
+  .dot { width:8px; height:8px; border-radius:50%; background:var(--red); display:inline-block } .dot.on { background:var(--green) }
+</style>
+</head>
+<body>
+<header>
+  <h1>VLAgent</h1>
+  <span class="meta" id="meta">connecting…</span>
+  <span class="meta" style="margin-left:auto"><span class="dot" id="dot"></span> <span id="conn">offline</span></span>
+</header>
+
+<section class="box" id="sim">
+  <div class="bar"><b>Simulation</b>
+    <button id="reset" title="Put every object and the arm back where they started. Learned skills and rules are kept.">↺ restart demo</button>
+    <label>scene <select id="scene" title="Relaunches the app in that scenario; the page reconnects"></select></label>
+    <label>camera <select id="camera"></select></label>
+    <button class="danger" id="stop" title="Stop the running skill or step (Ctrl-C). A rehearsal restores the world.">Stop</button>
+  </div>
+  <div class="body"><img id="frame" src="/stream" alt="simulation"></div>
+</section>
+
+<section class="box" id="lib">
+  <div class="bar"><b>Library</b>
+    <button class="toggle on" id="tabSkills">actions</button>
+    <button class="toggle" id="tabRules">safety</button>
+  </div>
+  <div class="list" id="libList"><div class="hint">No learned skills yet. Ask for something the arm cannot do.</div></div>
+</section>
+
+<section class="box" id="chat">
+  <div class="bar"><b>Talk to the arm</b>
+    <button class="toggle" id="voice" title="Dictate with the browser's speech recognition (or just type with Wispr Flow)">🎙 voice</button>
+    <button class="toggle" id="speak" title="Read the agent's replies aloud">🔊 speak</button>
+  </div>
+  <div id="messages"></div>
+  <form id="compose"><input id="text" autocomplete="off" placeholder="e.g. rotate the red block 90 degrees"><button class="primary">Send</button></form>
+</section>
+
+<section class="box" id="out">
+  <div class="bar"><b>What the agent is doing</b> <span>plans · generated code · rehearsals · verification</span>
+    <button id="clear">clear</button></div>
+  <div id="outbody"></div>
+</section>
+
+<script>
+const $ = s => document.querySelector(s);
+const messages = $('#messages'), outbody = $('#outbody'), libList = $('#libList');
+let ws, lib = {skills:[], rules:[], tags:{}}, tab = 'skills', speakOn = false;
+
+function connect() {
+  ws = new WebSocket((location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host + '/ws');
+  ws.onopen = () => { $('#dot').classList.add('on'); $('#conn').textContent = 'connected'; };
+  ws.onclose = () => { $('#dot').classList.remove('on'); $('#conn').textContent = 'offline — retrying'; setTimeout(connect, 1500); };
+  ws.onmessage = e => handle(JSON.parse(e.data));
+}
+function send(o) { if (ws && ws.readyState === 1) ws.send(JSON.stringify(o)); }
+
+function handle(ev) {
+  if (ev.type === 'hello') {
+    $('#meta').textContent = `scene ${ev.scene} · backend ${ev.backend} · planner ${ev.model} · safety ${ev.safety ? 'on' : 'OFF'}`;
+    const cam = $('#camera'); cam.innerHTML = '';
+    (ev.cameras || []).forEach(c => { const o = document.createElement('option'); o.value = o.textContent = c; if (c === ev.camera) o.selected = true; cam.appendChild(o); });
+    speakOn = !!ev.speak; $('#speak').classList.toggle('on', speakOn);
+    const sc = $('#scene'); sc.innerHTML = ''; sc.dataset.current = ev.scene;
+    (ev.scenes || []).forEach(s => { const o = document.createElement('option'); o.value = o.textContent = s; if (s === ev.scene) o.selected = true; sc.appendChild(o); });
+    messages.innerHTML = ''; outbody.innerHTML = '';
+    // the MJPEG connection dies with the old process; reopen it on every (re)connect
+    $('#frame').src = '/stream?' + Date.now();
+  } else if (ev.type === 'reset') {
+    messages.innerHTML = ''; outbody.innerHTML = '';
+  } else if (ev.type === 'restarting') {
+    $('#meta').textContent = `restarting in the ${ev.scene} scene…`;
+  } else if (ev.type === 'chat') {
+    const d = document.createElement('div');
+    d.className = 'msg ' + ev.role + (ev.ok === false ? ' bad' : ev.ok === true && ev.role === 'agent' ? ' good' : '');
+    d.textContent = ev.text; messages.appendChild(d); messages.scrollTop = messages.scrollHeight;
+  } else if (ev.type === 'prompt') {
+    const d = document.createElement('div'); d.className = 'prompt' + (ev.default === 'no' ? '' : ' soft'); d.dataset.id = ev.id;
+    d.innerHTML = `<div>${escapeHtml(ev.text)}</div><div class="btns"></div>`;
+    const btns = d.querySelector('.btns');
+    ev.options.forEach(opt => { const b = document.createElement('button'); b.textContent = opt;
+      if (opt === ev.default) b.classList.add('primary');
+      b.onclick = () => { send({type:'answer', id: ev.id, value: opt}); }; btns.appendChild(b); });
+    messages.appendChild(d); messages.scrollTop = messages.scrollHeight;
+  } else if (ev.type === 'prompt_done') {
+    const d = messages.querySelector(`.prompt[data-id="${ev.id}"]`); if (d) { d.classList.add('done'); d.querySelectorAll('button').forEach(b => b.disabled = true); }
+  } else if (ev.type === 'output') {
+    const w = document.createElement('div'); w.innerHTML = ev.html; outbody.appendChild(w); outbody.scrollTop = outbody.scrollHeight;
+  } else if (ev.type === 'library') {
+    lib = ev; renderLib();
+  }
+}
+function escapeHtml(s) { return s.replace(/[&<>]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;'}[c])); }
+
+function renderLib() {
+  libList.innerHTML = '';
+  if (tab === 'skills') {
+    if (!lib.skills.length) { libList.innerHTML = '<div class="hint">No learned skills yet. Ask for something the arm cannot do.</div>'; return; }
+    lib.skills.forEach(s => {
+      const r = document.createElement('div'); r.className = 'row';
+      r.innerHTML = `<span class="name">${escapeHtml(s.signature)}</span><span class="meta">${escapeHtml(s.effect)}</span>`
+        + `<span class="badge ${s.level}">${s.level}</span>` + (s.verified ? '<span class="badge verified">world</span>' : '<span class="badge">self</span>')
+        + (s.stale ? '<span class="badge stale">stale</span>' : '') + `<button data-forget="${s.name}" title="forget">✕</button>`;
+      r.onclick = e => { if (e.target.dataset.forget) { send({type:'command', text:'forget ' + s.name}); return; }
+        $('#text').value = s.name + ' the '; $('#text').focus();
+        showCode('skill ' + s.signature, s.code); };
+      libList.appendChild(r);
+    });
+  } else {
+    if (!lib.rules.length) { libList.innerHTML = '<div class="hint">No learned rules yet. State a policy, e.g. “the cup is corrosive, keep it away from the glass”.</div>'; return; }
+    lib.rules.forEach(r => {
+      const d = document.createElement('div'); d.className = 'row';
+      d.innerHTML = `<span class="name">${escapeHtml(r.name)}</span><span class="meta">${escapeHtml(r.doc)}</span><span class="badge">blocked ${r.blocks}</span><button data-forget="${r.name}" title="forget">✕</button>`;
+      d.onclick = e => { if (e.target.dataset.forget) { send({type:'command', text:'forget ' + r.name}); return; } showCode('rule ' + r.name, r.code); };
+      libList.appendChild(d);
+    });
+    const tags = Object.entries(lib.tags || {}).filter(([k, v]) => v.length).map(([k, v]) => `${k}: ${v.join(', ')}`).join(' · ');
+    if (tags) { const t = document.createElement('div'); t.className = 'hint'; t.textContent = 'tags · ' + tags; libList.appendChild(t); }
+  }
+}
+function showCode(title, code) {
+  const w = document.createElement('div'); w.innerHTML = `<pre class="rich"><span style="color:#b39ddb">── ${escapeHtml(title)} ──</span>\n${escapeHtml(code)}</pre>`;
+  outbody.appendChild(w); outbody.scrollTop = outbody.scrollHeight;
+}
+
+$('#tabSkills').onclick = () => { tab = 'skills'; $('#tabSkills').classList.add('on'); $('#tabRules').classList.remove('on'); renderLib(); };
+$('#tabRules').onclick = () => { tab = 'rules'; $('#tabRules').classList.add('on'); $('#tabSkills').classList.remove('on'); renderLib(); };
+$('#compose').onsubmit = e => { e.preventDefault(); const t = $('#text').value.trim(); if (!t) return; send({type:'command', text:t}); $('#text').value = ''; };
+$('#camera').onchange = e => send({type:'camera', name: e.target.value});
+$('#scene').onchange = e => { if (confirm(`Relaunch in the ${e.target.value} scene? The chat is cleared; skills and rules are kept.`)) send({type:'scene', name: e.target.value}); else e.target.value = e.target.dataset.current; };
+$('#reset').onclick = () => send({type:'command', text:'reset'});
+$('#stop').onclick = () => send({type:'stop'});
+$('#clear').onclick = () => { outbody.innerHTML = ''; };
+$('#speak').onclick = () => { speakOn = !speakOn; $('#speak').classList.toggle('on', speakOn); send({type:'speak', on: speakOn}); };
+
+// Voice: the browser's own recognition, so nothing to install. Wispr Flow users can ignore this and just type.
+let rec = null;
+$('#voice').onclick = () => {
+  const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+  if (!SR) { alert('This browser has no speech recognition. Dictate into the box with Wispr Flow instead.'); return; }
+  if (rec) { rec.stop(); rec = null; $('#voice').classList.remove('on'); return; }
+  rec = new SR(); rec.lang = 'en-US'; rec.interimResults = true; rec.continuous = true;
+  rec.onresult = e => { let final = '', interim = '';
+    for (let i = e.resultIndex; i < e.results.length; i++) { const t = e.results[i][0].transcript; if (e.results[i].isFinal) final += t; else interim += t; }
+    if (interim) $('#text').value = interim;
+    if (final.trim()) { $('#text').value = ''; send({type:'command', text: final.trim()}); } };
+  rec.onend = () => { if (rec) { try { rec.start(); } catch (_) {} } };
+  rec.start(); $('#voice').classList.add('on');
+};
+connect();
+</script>
+</body>
+</html>

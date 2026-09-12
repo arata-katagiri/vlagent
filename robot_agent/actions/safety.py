@@ -14,6 +14,7 @@ import math
 
 from .schema import (
     ACTIONS,
+    ARM_ACTIONS,
     DIRECTION_VECTORS,
     DIRECTIONS,
     MAX_PUSH_DISTANCE_M,
@@ -21,6 +22,9 @@ from .schema import (
     MIN_REACH_M,
     ActionCall,
     Safety,
+    arms as scene_arms,
+    multi_arm,
+    required_args,
 )
 
 # --- policy switch -------------------------------------------------------
@@ -65,10 +69,62 @@ def _obj(state: dict, name: str) -> dict | None:
     return state["objects"].get(name)
 
 
-def reachable(x_m: float, y_m: float) -> bool:
-    """Whether a tabletop point is inside the arm's annular workspace."""
-    r = math.hypot(x_m, y_m)
+# --- arms ----------------------------------------------------------------
+#
+# A single-arm state has {"gripper": {...}} and no "arms" key; a two-arm state
+# has both, and "gripper" is only a compatibility mirror. Every check below goes
+# through these three helpers, so the same code serves either scene.
+
+
+def holding_of(state: dict, arm: str | None = None) -> str | None:
+    """What the named arm is holding. Falls back to the single gripper."""
+    arms = state.get("arms")
+    if not arms:
+        return state["gripper"]["holding"]
+    if arm in arms:
+        return arms[arm]["holding"]
+    return next((a["holding"] for a in arms.values() if a["holding"]), None)
+
+
+def base_of(state: dict, arm: str | None = None) -> tuple[float, float]:
+    """Where the named arm is bolted down. The world origin in a single-arm scene."""
+    arms = state.get("arms")
+    if not arms or arm not in arms:
+        return (0.0, 0.0)
+    bx, by = arms[arm]["base_m"][:2]
+    return (float(bx), float(by))
+
+
+def reachable(x_m: float, y_m: float, base: tuple[float, float] = (0.0, 0.0)) -> bool:
+    """Whether a tabletop point is inside an arm's annular workspace."""
+    r = math.hypot(x_m - base[0], y_m - base[1])
     return MIN_REACH_M <= r <= MAX_REACH_M
+
+
+def _out_of_reach(state: dict, arm: str | None, x: float, y: float, what: str) -> str | None:
+    """A readable reason if this arm cannot reach the point, else None.
+
+    Single-arm wording is left exactly as it was, so scenario hooks and tests
+    that match on it keep working. Only the multi-arm form names an arm, and it
+    says which other arm could do the job -- that sentence is what lets the
+    planner recover by handing the step to the other arm.
+    """
+    base = base_of(state, arm)
+    if reachable(x, y, base):
+        return None
+    if not arm:
+        return (
+            f"({x:.2f}, {y:.2f}) m is outside the arm's reach "
+            f"({MIN_REACH_M}-{MAX_REACH_M} m from the base)"
+        )
+    r = math.hypot(x - base[0], y - base[1])
+    other = [a for a in (state.get("arms") or {})
+             if a != arm and reachable(x, y, base_of(state, a))]
+    hint = f"; arm {other[0]} can reach it" if other else ""
+    return (
+        f"{what} at ({x:.2f}, {y:.2f}) m is {r:.2f} m from arm {arm}'s base, outside "
+        f"its {MIN_REACH_M}-{MAX_REACH_M} m reach{hint}"
+    )
 
 
 def off_table(state: dict, x_m: float, y_m: float) -> bool:
@@ -156,12 +212,16 @@ def check_preconditions(call: ActionCall, state: dict) -> list[str]:
     if name not in ACTIONS:
         return _skill_preconditions(name, args, state)
 
-    required, _ = ACTIONS[name]
-    missing = [a for a in required if a not in args]
+    missing = [a for a in required_args(name) if a not in args]
     if missing:
         return [f"{name} is missing required argument(s): {', '.join(missing)}"]
 
-    holding = state["gripper"]["holding"]
+    arm = args.get("arm")
+    if multi_arm() and name in ARM_ACTIONS:
+        if arm not in scene_arms():
+            return [f"'{arm}' is not one of the arms ({', '.join(scene_arms())})"]
+
+    holding = holding_of(state, arm)
     problems: list[str] = []
 
     if name == "pick":
@@ -177,15 +237,22 @@ def check_preconditions(call: ActionCall, state: dict) -> list[str]:
                 problems.append(f"{target} has {on_top} on top of it")
             if not obj["on_table"]:
                 problems.append(f"{target} is not on the table")
+            else:
+                x, y = obj["position_m"][0], obj["position_m"][1]
+                far = _out_of_reach(state, arm, x, y, target)
+                if far:
+                    problems.append(far)
         if holding is not None:
-            problems.append(f"the gripper is already holding {holding}")
+            who = f"arm {arm}" if arm else "the gripper"
+            problems.append(f"{who} is already holding {holding}")
 
     elif name == "place_on":
         named = args["target"]
         target = named
         obj = _obj(state, target)
         if holding is None:
-            problems.append("the gripper is not holding anything")
+            problems.append(f"arm {arm} is not holding anything" if arm
+                            else "the gripper is not holding anything")
         if obj is None:
             problems.append(f"there is no object called '{target}'")
         else:
@@ -201,6 +268,9 @@ def check_preconditions(call: ActionCall, state: dict) -> list[str]:
                 f" (placing on {named} means landing on {target}, which sits on top of it)"
                 if target != named else ""
             )
+            far = _out_of_reach(state, arm, obj["position_m"][0], obj["position_m"][1], target)
+            if far:
+                problems.append(far)
             if target == holding:
                 problems.append(f"cannot place {target} on itself")
             elif _POLICY_ENABLED:
@@ -221,13 +291,12 @@ def check_preconditions(call: ActionCall, state: dict) -> list[str]:
 
     elif name == "place_at":
         if holding is None:
-            problems.append("the gripper is not holding anything")
+            problems.append(f"arm {arm} is not holding anything" if arm
+                            else "the gripper is not holding anything")
         x, y = float(args["x_m"]), float(args["y_m"])
-        if not reachable(x, y):
-            problems.append(
-                f"({x:.2f}, {y:.2f}) m is outside the arm's reach "
-                f"({MIN_REACH_M}-{MAX_REACH_M} m from the base)"
-            )
+        far = _out_of_reach(state, arm, x, y, "that point")
+        if far:
+            problems.append(far)
 
     elif name == "push":
         target = args["object"]
@@ -241,8 +310,13 @@ def check_preconditions(call: ActionCall, state: dict) -> list[str]:
             problems.append(f"there is no object called '{target}'")
         elif not obj["on_table"]:
             problems.append(f"{target} is not on the table")
+        else:
+            far = _out_of_reach(state, arm, obj["position_m"][0], obj["position_m"][1], target)
+            if far:
+                problems.append(far)
         if holding is not None:
-            problems.append(f"the gripper is holding {holding}; put it down before pushing")
+            who = f"arm {arm}" if arm else "the gripper"
+            problems.append(f"{who} is holding {holding}; put it down before pushing")
         if direction not in DIRECTIONS:
             problems.append(f"direction must be one of {', '.join(DIRECTIONS)}, got '{direction}'")
         if not (0.0 < distance <= MAX_PUSH_DISTANCE_M):
@@ -285,7 +359,7 @@ def classify(call: ActionCall, state: dict) -> tuple[Safety, str]:
     if name == "place_at":
         x, y = float(args["x_m"]), float(args["y_m"])
         over = overhang_m(state, x, y)
-        held = state["gripper"]["holding"]
+        held = holding_of(state, args.get("arm"))
         what = held or "the held object"
         if over > 0.0:
             return (
@@ -318,6 +392,7 @@ def classify(call: ActionCall, state: dict) -> tuple[Safety, str]:
 
 __all__ = [
     "check_preconditions", "classify", "reachable", "off_table", "stacking_overhang",
+    "holding_of", "base_of",
     "set_policy_enabled", "policy_enabled",
     "overhang_m", "predict_push_end", "STACKABLE_TARGETS",
 ]

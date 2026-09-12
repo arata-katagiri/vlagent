@@ -310,3 +310,41 @@ def test_skill_events_are_rendered_into_conversation_memory():
     assert "FAILED (world-verified)" in t["content"] and "0.140 m inside" in t["content"]
     assert _as_turn("skill_kept", {"name": "rotate", "level": "safe"})["content"].startswith("The user kept skill rotate")
     assert _as_turn("skill_abandoned", {"name": "sweep_off", "attempt": 3}) is not None
+
+
+# -- two arms ------------------------------------------------------------------
+def test_resolve_routes_by_arm_and_strips_the_field():
+    from robot_agent.skills.rehearse import resolve
+
+    class Two:
+        a, b = object(), object()
+        def for_arm(self, name):
+            return self.b if name == "b" else self.a
+
+    two = Two()
+    handle, args = resolve(two, {"object": "cup", "arm": "b"})
+    assert handle is two.b and args == {"object": "cup"}
+    single = object()
+    assert resolve(single, {"object": "cup"}) == (single, {"object": "cup"})
+
+
+def test_a_learned_skill_rehearses_on_a_named_arm_in_the_two_arm_scene():
+    from robot_agent.sim.two_arm_backend import TwoArms
+    from robot_agent.sim.two_arm_scene import build_two_arm_scene, settle
+    from robot_agent.sim.two_arm_world_state import get_two_arm_world_state
+    from robot_agent.skills.prompt import AUTHORING_GUIDE
+
+    model, data = build_two_arm_scene()
+    settle(model, data, 0.3)
+    arms = TwoArms(model, data)
+    get_state = lambda: get_two_arm_world_state(model, data)  # noqa: E731
+    code = AUTHORING_GUIDE.split("Example (a general rotate skill):")[1].replace("{{", "{").replace("}}", "}")
+    skill = Skill(name="rotate", doc="", effect="", args=["object", "angle_deg"], code=code,
+                  effect_kind="rotates_by", effect_of="object", effect_value="angle_deg")
+    before = get_state()
+    verdict = rehearse(skill, {"object": "red_block", "angle_deg": 90, "arm": "a"}, arms, get_state)
+    assert verdict.ok and verdict.verified, verdict.reason
+    assert verdict.metrics["rotated"].get("red_block", 0) > 70
+    after = get_state()
+    assert after["objects"]["red_block"]["position_m"] == before["objects"]["red_block"]["position_m"]
+    assert arms.a.held is None and arms.b.held is None

@@ -25,11 +25,15 @@ from ..actions.executor import classify_plan, execute
 from ..actions.safety import set_policy_enabled
 from ..actions.schema import ActionCall, Safety
 from ..agent import planner
-from ..agent.llm import SkillProposal, build_llm
+from ..agent.llm import RuleProposal, SkillProposal, build_llm
 from ..skills.registry import REGISTRY, SKILL_ARG_KEYS, Skill
-from ..skills.rehearse import rehearse
+from ..skills.rehearse import rehearse, restore, snapshot
+from ..skills.rules import RULES, Rule, dry_run, install_hooks
+from ..skills.sandbox import SkillCodeError
 
 MAX_SKILL_REVISIONS = 3
+SCENES = ("default", "lab", "two_arm", "chess", "chess_two_arm")
+INITIAL: dict | None = None      # the world as built, for `reset`
 from . import ui
 
 RUNS_DIR = Path(__file__).resolve().parents[2] / "runs"
@@ -148,6 +152,18 @@ def _as_turn(kind: str, f: dict) -> dict | None:
         return {"role": "assistant", "content": f"Revising {f.get('name')} made these dependent skills stale: {', '.join(f.get('dependents') or [])}."}
     if kind == "interrupted":
         return {"role": "assistant", "content": "The user interrupted the command with Ctrl-C."}
+    if kind == "rule_proposed":
+        return {"role": "assistant", "content": f"Proposed safety rule {f.get('name')}: {f.get('doc', '')}"}
+    if kind == "rule_dry_run":
+        if f.get("error"):
+            return {"role": "assistant", "content": f"Rule {f.get('name')} was rejected: {f.get('error')}"}
+        b = f.get("blocked") or []
+        return {"role": "assistant", "content": f"Dry run of rule {f.get('name')}: it would refuse {len(b)} action(s) in the scene now"
+                + (": " + "; ".join(map(str, b[:3])) if b else "")}
+    if kind == "rule_kept":
+        return {"role": "assistant", "content": f"The user kept safety rule {f.get('name')}; it now applies to every plan and skill."}
+    if kind == "rule_discarded":
+        return {"role": "assistant", "content": f"The user did not keep safety rule {f.get('name')}."}
     return None
 
 
@@ -165,8 +181,15 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--voice", action="store_true",
                    help="speak commands instead of typing (local Whisper + say); "
                         "falls back to typing if the microphone is unavailable")
-    p.add_argument("--scene", choices=("default", "lab"), default="default",
-                   help="which scenario to load: the kitchen table (default) or the lab bench")
+    p.add_argument("--scene", choices=("default", "lab", "two_arm", "chess", "chess_two_arm"),
+                   default="default",
+                   help="which scenario to load: the kitchen table (default), the lab "
+                        "bench, two arms facing each other across one table, a chessboard "
+                        "with one arm, or a chessboard between two arms")
+    p.add_argument("--fen", default="endgame",
+                   help="chess scenes only: a FEN string or a preset name (endgame, opening)")
+    p.add_argument("--web", nargs="?", const=8000, type=int, default=None, metavar="PORT",
+                   help="serve the browser UI on this port (default 8000); implies --no-viewer")
     p.add_argument("--skills-dir", default=None,
                    help="where learned skills are kept (default: ./skills)")
     p.add_argument(
@@ -179,9 +202,64 @@ def build_parser() -> argparse.ArgumentParser:
     return p
 
 
+def _attach_viewer_and_recorder(args, stack, model, data, camera):
+    """Viewer and mp4 hooks, shared by every scene. Returns a sync callable."""
+    hooks = []
+    if not args.no_viewer:
+        import mujoco.viewer  # noqa: PLC0415
+
+        viewer = stack.enter_context(
+            mujoco.viewer.launch_passive(model, data, show_left_ui=False, show_right_ui=False)
+        )
+        viewer.cam.fixedcamid = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_CAMERA, camera)
+        viewer.cam.type = mujoco.mjtCamera.mjCAMERA_FIXED
+        hooks.append(viewer.sync)
+
+    if args.record:
+        from ..sim.render import RUNS_DIR, recorder  # noqa: PLC0415
+
+        path = RUNS_DIR / f"{datetime.now(timezone.utc):%Y%m%dT%H%M%SZ}.mp4"
+        rec = stack.enter_context(recorder(model, path, camera=camera))
+        hooks.append(lambda: rec.capture(data))
+        ui.note(f"recording to {path}")
+
+    if getattr(args, "web", None):
+        from .web import install_grabber  # noqa: PLC0415
+
+        hooks.append(install_grabber(model, data, camera))
+
+    def sync():
+        for hook in hooks:
+            hook()
+
+    return sync
+
+
+def build_two_arm_world(args, stack):
+    """Two Pandas facing each other. Every physical step names the arm that runs it."""
+    from ..actions.schema import set_arms  # noqa: PLC0415
+    from ..sim.two_arm_backend import TwoArms  # noqa: PLC0415
+    from ..sim.two_arm_scene import ARMS, CAMERA_NAME, build_two_arm_scene, settle  # noqa: PLC0415
+    from ..sim.two_arm_world_state import get_two_arm_world_state  # noqa: PLC0415
+
+    model, data = build_two_arm_scene()
+    settle(model, data, 0.3)
+    set_arms(tuple(ARMS))          # makes `arm` a required argument everywhere
+    sync = _attach_viewer_and_recorder(args, stack, model, data, CAMERA_NAME)
+    arms = TwoArms(model, data, sync=sync)
+    ui.note(f"scene: two arms ({', '.join(ARMS)}) facing each other; the tray in the "
+            "middle is the hand-off point")
+    return (lambda: get_two_arm_world_state(model, data)), arms
+
+
 def build_world(args, stack):
     """Return (get_state, backend). `mock` needs no simulator and no viewer."""
     drift = 0.08 if args.inject_failure else 0.0
+
+    if args.scene in ("two_arm", "chess_two_arm"):
+        if args.backend == "mock":
+            raise SystemExit(f"--scene {args.scene} needs the panda backend (drop --backend mock)")
+        return build_two_arm_world(args, stack)
 
     if args.backend == "mock":
         from ..sim.backends import MockBackend, initial_state  # noqa: PLC0415
@@ -218,6 +296,11 @@ def build_world(args, stack):
         hooks.append(lambda: rec.capture(data))
         ui.note(f"recording to {path}")
 
+    if getattr(args, "web", None):
+        from .web import install_grabber  # noqa: PLC0415
+
+        hooks.append(install_grabber(model, data, CAMERA_NAME))
+
     def sync():
         for hook in hooks:
             hook()
@@ -236,6 +319,10 @@ def run_command(command: str, get_state, backend, llm, log: RunLog) -> None:
               steps=[(s.name, s.args) for s in outcome.steps],
               summary=outcome.summary, problems=outcome.problems,
               answer=outcome.answer, question=outcome.question)
+
+    if outcome.rule is not None:
+        _learn_rule(outcome.rule, get_state, log)
+        return
 
     if outcome.skill is not None:
         learned = _learn_skill(outcome.skill, command, get_state, backend, llm, log)
@@ -304,6 +391,36 @@ def run_command(command: str, get_state, backend, llm, log: RunLog) -> None:
         return
 
     ui.report(_summarize(command, executed), spoken=_spoken(executed))
+
+
+def _learn_rule(proposal: RuleProposal, get_state, log: RunLog):
+    """Show the rule, dry-run it against the scene, ask the user to keep it."""
+    rule = Rule(name=proposal.name, doc=proposal.doc, code=proposal.code)
+    ui.rule_code(rule, proposal.tags)
+    log.write("rule_proposed", name=rule.name, doc=rule.doc, code=rule.code, tags=proposal.tags)
+    # tags are applied for the dry run and rolled back if the rule is not kept
+    before_tags = {k: list(v) for k, v in RULES.tags.items()}
+    for obj, tags in proposal.tags.items():
+        RULES.tag(obj, *tags, persist=False)
+    try:
+        blocked = dry_run(rule, get_state())
+        error = None
+    except SkillCodeError as exc:
+        blocked, error = [], str(exc)
+    ui.rule_dry_run(rule, blocked, error)
+    log.write("rule_dry_run", name=rule.name, blocked=blocked, error=error)
+    if error or not rule.name.isidentifier() or not ui.confirm_keep_rule(rule):
+        RULES.tags.clear()
+        RULES.tags.update(before_tags)
+        log.write("rule_discarded", name=rule.name, error=error)
+        ui.note(f"  {rule.name} not kept")
+        return None
+    rule.dry_run = blocked
+    RULES.register(rule)
+    RULES.save_tags()
+    log.write("rule_kept", name=rule.name, tags=proposal.tags, blocked=blocked)
+    ui.note(f"  {rule.name} saved to {RULES.dir / (rule.name + '.json')}; it now applies to every plan and skill")
+    return rule
 
 
 def _learn_skill(proposal: SkillProposal, command: str, get_state, backend, llm, log: RunLog):
@@ -496,15 +613,31 @@ def main() -> None:
 
     set_policy_enabled(bool(args.safety))
 
+    if args.web:
+        args.no_viewer = True
+        from .web import WebSink  # noqa: PLC0415
+
+        WebSink().install()
+
     if args.scene == "lab":
         from ..sim.lab_scene import activate as activate_lab  # noqa: PLC0415
 
         activate_lab()
         ui.note("scene: lab bench (acid_bottle, water_flask, three samples, containment tray)")
+    elif args.scene in ("chess", "chess_two_arm"):
+        from ..sim.chess_scene import PIECES, activate as activate_chess  # noqa: PLC0415
+
+        activate_chess(args.fen, two_arm=(args.scene == "chess_two_arm"))
+        who = "arm a on the white side, arm b on the black side" if args.scene == "chess_two_arm" else "one arm"
+        ui.note(f"scene: chessboard, {len(PIECES)} pieces ({args.fen}), {who}; captured pieces go on the tray")
 
     if args.skills_dir:
         REGISTRY.dir = Path(args.skills_dir)
     learned_count = REGISTRY.load()
+    if args.skills_dir:
+        RULES.dir = Path(args.skills_dir).parent / "rules"
+    rule_count = RULES.load()
+    install_hooks()
 
     llm = build_llm(args.mock_llm)
 
@@ -519,9 +652,12 @@ def main() -> None:
 
     with ExitStack() as stack:
         get_state, backend = build_world(args, stack)
+        global INITIAL
+        INITIAL = snapshot(backend)
 
         ui.banner(args.backend, model, safety=bool(args.safety))
         ui.note(f"{learned_count} learned skill(s) in {REGISTRY.dir}; type 'skills' to list them")
+        ui.note(f"{rule_count} learned safety rule(s) in {RULES.dir}; type 'rules' to list them")
         ui.scene(get_state())
 
         if args.demo:
@@ -530,6 +666,15 @@ def main() -> None:
                 run_command(command, get_state, backend, llm, log)
                 ui.scene(get_state())
             ui.note(f"demo complete; log written to {log.path}")
+            return
+
+        if args.web:
+            from .web import serve  # noqa: PLC0415
+
+            serve(args, get_state, backend, llm, log, handle_command,
+                  info={"scene": args.scene, "backend": args.backend, "model": model,
+                        "safety": bool(args.safety), "scenes": list(SCENES)})
+            ui.note(f"log written to {log.path}")
             return
 
         while True:
@@ -543,25 +688,57 @@ def main() -> None:
                 break
             if not command:
                 continue
-            if command.lower() in ("quit", "exit"):
-                break
-            if command.lower() == "skills":
-                ui.skills(REGISTRY)
-                continue
-            if command.lower() == "graph":
-                ui.graph(REGISTRY)
-                continue
-            if command.lower().startswith("forget "):
-                name = command.split(None, 1)[1].strip()
-                ui.note(f"forgot {name}" if REGISTRY.forget(name) else f"no skill called {name}")
-                continue
             try:
-                run_command(command, get_state, backend, llm, log)
+                if not handle_command(command, get_state, backend, llm, log):
+                    break
             except KeyboardInterrupt:
                 ui.note("stopped by Ctrl-C; the arm stays where it is (type 'home' to reset it)")
                 log.write("interrupted", command=command)
 
     ui.note(f"log written to {log.path}")
+
+
+def handle_command(command: str, get_state, backend, llm, log: RunLog) -> bool:
+    """One line from the person, typed, spoken or sent from the page. Returns
+    False when the session should end. KeyboardInterrupt propagates."""
+    low = command.lower()
+    if low in ("quit", "exit"):
+        return False
+    if low in ("reset", "restart"):
+        if INITIAL is not None:
+            restore(backend, INITIAL)
+        ui.note("world reset to its starting state; learned skills and rules are kept")
+        ui.scene(get_state())
+        log.write("reset")
+        return True
+    if low == "skills":
+        ui.skills(REGISTRY)
+        return True
+    if low == "graph":
+        ui.graph(REGISTRY)
+        return True
+    if low == "rules":
+        ui.rules(RULES)
+        return True
+    if low.startswith("tag "):
+        parts = command.split()
+        if len(parts) >= 3:
+            tags = RULES.tag(parts[1], *parts[2:])
+            ui.note(f"{parts[1]} is now tagged: {', '.join(tags)}")
+        else:
+            ui.note("usage: tag <object> <tag> [<tag> ...]")
+        return True
+    if low.startswith("forget "):
+        name = command.split(None, 1)[1].strip()
+        if REGISTRY.forget(name):
+            ui.note(f"forgot skill {name}")
+        elif RULES.forget(name):
+            ui.note(f"forgot rule {name}")
+        else:
+            ui.note(f"no skill or rule called {name}")
+        return True
+    run_command(command, get_state, backend, llm, log)
+    return True
 
 
 if __name__ == "__main__":

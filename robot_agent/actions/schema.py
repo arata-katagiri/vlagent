@@ -36,9 +36,41 @@ PLACEMENT_TOLERANCE_M = 0.02
 LIFT_HEIGHT_M = 0.15
 APPROACH_HEIGHT_M = 0.08
 
-# Arm workspace, measured from the base at the world origin.
+# Arm workspace, as a radius from an arm's own base. In the single-arm scene the
+# base is the world origin; in the two-arm scene each arm has its own base and
+# safety.reachable() is given that base.
 MIN_REACH_M = 0.25
 MAX_REACH_M = 0.80
+
+# Which actions are performed *by an arm*, and therefore need an `arm` argument
+# once the scene has more than one. ask_user is not one of them.
+ARM_ACTIONS = ("pick", "place_on", "place_at", "push", "home")
+
+# Names of the arms in the loaded scene, set once at startup by app.main.
+# Empty means a single-arm scene, and nothing below changes shape.
+_ARM_NAMES: tuple[str, ...] = ()
+
+
+def set_arms(names) -> None:
+    """Declare the arms in the loaded scene. Called once, before the first plan."""
+    global _ARM_NAMES
+    _ARM_NAMES = tuple(names)
+
+
+def arms() -> tuple[str, ...]:
+    return _ARM_NAMES
+
+
+def multi_arm() -> bool:
+    return len(_ARM_NAMES) > 1
+
+
+def required_args(name: str) -> tuple[str, ...]:
+    """Required argument keys for an action, including `arm` in a multi-arm scene."""
+    base = ACTIONS[name][0] if name in ACTIONS else ()
+    if multi_arm() and name in ARM_ACTIONS:
+        return base + ("arm",)
+    return base
 
 
 @dataclass
@@ -93,9 +125,14 @@ SIGNATURES: dict[str, str] = {
 def describe_actions() -> str:
     """The action catalogue for the system prompt, from a single source."""
     lines = []
-    for name, (required, description) in ACTIONS.items():
-        lines.append(f"  {name}({SIGNATURES[name]})")
+    arm_note = f', arm: one of {"|".join(_ARM_NAMES)}' if multi_arm() else ""
+    for name, (_, description) in ACTIONS.items():
+        sig = SIGNATURES[name]
+        if multi_arm() and name in ARM_ACTIONS:
+            sig = "arm: str" if sig == "no arguments: {}" else sig + arm_note
+        lines.append(f"  {name}({sig})")
         lines.append(f"      {description}")
+        required = required_args(name)
         if required:
             lines.append(f"      required keys in args: {', '.join(required)}")
     return "\n".join(lines)
@@ -155,6 +192,26 @@ def plan_tool_schema() -> list[dict]:
         },
         "required": ["name", "rationale"],
     }
+    if multi_arm():
+        # Pinned to an enum for the same reason `name` is: an invented arm name
+        # would reach the executor and fail there instead of at the schema.
+        #
+        # And listed in `required`: with `arm` merely described, gpt-4o proposed
+        # a correct five-step hand-off three times in a row and omitted the arm
+        # on every step, even after the validator handed back "missing required
+        # argument: arm" as feedback. Provider-side required is what actually
+        # makes the field appear. ask_user steps get a spurious arm, which the
+        # executor ignores.
+        step["required"] = list(step["required"]) + ["arm"]
+        step["properties"]["arm"] = {
+            "type": "string",
+            "enum": list(_ARM_NAMES),
+            "description": (
+                "Which arm performs this step. Required by "
+                + ", ".join(ARM_ACTIONS)
+                + ". Each arm can only reach part of the table."
+            ),
+        }
     return [
         {
             "type": "function",
@@ -211,6 +268,7 @@ def plan_tool_schema() -> list[dict]:
             },
         },
         define_skill_tool(),
+        define_rule_tool(),
     ]
 
 
@@ -218,6 +276,39 @@ def _learned_names() -> list[str]:
     from ..skills.registry import REGISTRY  # noqa: PLC0415
 
     return REGISTRY.names()
+
+
+def define_rule_tool() -> dict:
+    """The tool that lets the planner propose a safety rule (see skills/rules.py)."""
+    return {
+        "type": "function",
+        "function": {
+            "name": "define_rule",
+            "description": (
+                "Propose a new safety rule when the user states a policy about what is "
+                "dangerous or must never happen. It becomes deterministic code that runs on "
+                "every plan and every learned skill; it can only add refusals or raise levels. "
+                "The user sees what it would block right now and decides whether to keep it."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string", "description": "snake_case, e.g. corrosive_separation"},
+                    "doc": {"type": "string", "description": "One line: the policy in plain English."},
+                    "tags_json": {
+                        "type": "string",
+                        "description": 'JSON object of tags to attach to objects, e.g. {"cup": ["corrosive"], "glass": ["water"]}. Empty if none.',
+                    },
+                    "code": {
+                        "type": "string",
+                        "description": "Python defining check(before, after, action, args) and optionally level(before, after, action, args).",
+                    },
+                    "summary": {"type": "string", "description": "One sentence for the user."},
+                },
+                "required": ["name", "doc", "tags_json", "code", "summary"],
+            },
+        },
+    }
 
 
 def define_skill_tool() -> dict:
@@ -292,7 +383,7 @@ def define_skill_tool() -> dict:
 
 # Step fields that carry action arguments, as opposed to bookkeeping.
 ARG_KEYS = ("object", "target", "x_m", "y_m", "direction", "distance_m", "question",
-            "angle_deg", "height_m", "count", "speed")
+            "angle_deg", "height_m", "count", "speed", "arm")
 
 
 __all__ = [
@@ -300,5 +391,6 @@ __all__ = [
     "DIRECTIONS", "DIRECTION_VECTORS", "MAX_PUSH_DISTANCE_M",
     "PLACEMENT_TOLERANCE_M", "LIFT_HEIGHT_M", "APPROACH_HEIGHT_M",
     "MIN_REACH_M", "MAX_REACH_M", "plan_tool_schema", "SIGNATURES", "describe_actions",
+    "ARM_ACTIONS", "set_arms", "arms", "multi_arm", "required_args",
     "ARG_KEYS",
 ]

@@ -52,7 +52,7 @@ def main():
     png(model, data, RUNS_DIR / "two_arm_start.png", camera=CAMERA_NAME)
 
     log = []
-    target = (0.68, 0.0)
+    target = (0.88, 0.0)
     with recorder(model, RUNS_DIR / "two_arm_demo.mp4", camera=CAMERA_NAME) as rec:
         arms.a.sync = lambda: rec.capture(data)
         arms.b.sync = lambda: rec.capture(data)
