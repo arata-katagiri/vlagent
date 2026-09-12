@@ -1,8 +1,11 @@
 """Arm backends. One Protocol, three implementations, built in this order.
 
-MockBackend        - Phase 2, no MuJoCo. Lets the agent loop be built and tested first.
-PandaIKBackend     - Phase 4, mink differential IK driving the Panda position actuators.
-FloatingGripperBackend - escape hatch, mocap body moved directly. Hard cutoff 2:15 PM.
+MockBackend    - no MuJoCo. Lets the agent loop be built and tested first.
+PandaIKBackend - mink differential IK driving the Panda position actuators.
+
+The planned FloatingGripperBackend escape hatch was not needed: the IK backend
+picks and places every object in the scene reliably, so carrying a second
+simulated arm would be dead weight.
 """
 
 from __future__ import annotations
@@ -10,7 +13,10 @@ from __future__ import annotations
 import math
 from typing import Protocol
 
-from .scene import ITEMS, footprint, half_height
+import mujoco
+import numpy as np
+
+from .scene import GRASP_SITE, HAND_BODY, ITEMS, footprint, half_height, object_qposadr
 
 # How close the empty gripper must pass to an object to shove it, in metres.
 PUSH_CONTACT_M = 0.07
@@ -20,9 +26,17 @@ class ArmBackend(Protocol):
     """Everything the executor is allowed to ask of a body."""
 
     def move_to(
-        self, pos_m: list[float], yaw_rad: float = 0.0, timeout_s: float = 5.0
+        self,
+        pos_m: list[float],
+        yaw_rad: float = 0.0,
+        timeout_s: float = 5.0,
+        tolerance_m: float | None = None,
     ) -> bool:
-        """Move the gripper to a world position. False if not within 1 cm in time."""
+        """Move the gripper to a world position.
+
+        False if the tool centre point does not arrive within `tolerance_m`
+        (default: the backend's precision tolerance) before the timeout.
+        """
         ...
 
     def open_gripper(self) -> None: ...
@@ -65,7 +79,8 @@ class MockBackend:
         self.state["gripper"]["position_m"] = list(self.HOME_POS)
 
     # -- ArmBackend ------------------------------------------------------
-    def move_to(self, pos_m, yaw_rad: float = 0.0, timeout_s: float = 5.0) -> bool:
+    def move_to(self, pos_m, yaw_rad: float = 0.0, timeout_s: float = 5.0,
+                tolerance_m: float | None = None) -> bool:
         if self.fail_moves_beyond_m is not None:
             if math.hypot(pos_m[0], pos_m[1]) > self.fail_moves_beyond_m:
                 return False
@@ -211,19 +226,183 @@ def initial_state() -> dict:
     }
 
 
-class PandaIKBackend:
-    """mink differential IK: FrameTask on attachment_site + PostureTask.
+# IK and motion tuning.
+IK_SOLVER = "daqp"
+IK_POS_TOL_M = 1e-4
+IK_ORI_TOL_RAD = 1e-4
+IK_MAX_ITERS = 20
+CARTESIAN_SPEED_MS = 0.35
+# Precision tolerance, for grasping and setting down. Clearance waypoints pass a
+# looser value: carrying a load at reach leaves ~1.2 cm of droop, which is
+# irrelevant when the move only has to lift the object clear of the table.
+MOVE_TOLERANCE_M = 0.01
+CORRECTION_ROUNDS = 3
+GRIPPER_OPEN = 255.0
+GRIPPER_CLOSED = 0.0
 
-    Phase 4. Shape follows mink's own arm_panda.py example: iterate solve_ik and
-    integrate_inplace to convergence, then data.ctrl = configuration.q[:8], mj_step.
+
+class PandaIKBackend:
+    """mink differential IK driving the Panda position actuators.
+
+    Shape follows mink's own arm_panda.py: iterate solve_ik and integrate_inplace
+    to convergence, then write configuration.q into ctrl and step. Cartesian moves
+    are interpolated at a fixed speed so the motion reads as real time on video.
+
+    Grasping is faked with the weld equalities built into the scene: attach()
+    writes the live relative pose into eq_data and activates the weld, so the
+    object keeps real velocity on release instead of popping.
     """
 
-    def __init__(self) -> None:
-        raise NotImplementedError("Phase 4")
+    def __init__(self, model, data, sync=None, settle_steps: int = 40,
+                 drift_m: float = 0.0):
+        import mink  # noqa: PLC0415
+
+        self._mink = mink
+        self.model = model
+        self.data = data
+        self.sync = sync or (lambda: None)
+        self.settle_steps = settle_steps
+
+        self.configuration = mink.Configuration(model)
+        self.configuration.update(data.qpos)
+
+        self.eef_task = mink.FrameTask(
+            frame_name=GRASP_SITE,
+            frame_type="site",
+            position_cost=1.0,
+            orientation_cost=1.0,
+            lm_damping=1.0,
+        )
+        self.posture_task = mink.PostureTask(model=model, cost=1e-2)
+        self.posture_task.set_target_from_configuration(self.configuration)
+        self.tasks = [self.eef_task, self.posture_task]
+
+        # Top-down orientation, taken from the home pose rather than derived from
+        # a Euler convention: the hand's local z already points down at `home`.
+        self.site_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_SITE, GRASP_SITE)
+        self.hand_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, HAND_BODY)
+        self.home_rotation = mink.SO3.from_matrix(
+            data.site(GRASP_SITE).xmat.reshape(3, 3).copy()
+        )
+        self.home_pos = data.site(GRASP_SITE).xpos.copy()
+
+        self.welds = {
+            name: i
+            for i in range(model.neq)
+            for name in [model.equality(i).name.removeprefix("weld_")]
+            if model.equality(i).name.startswith("weld_")
+        }
+        self.held: str | None = None
+        self.drift_m = drift_m
+        self.data.ctrl[7] = GRIPPER_OPEN
+
+    # -- ArmBackend ------------------------------------------------------
+    def move_to(self, pos_m, yaw_rad: float = 0.0, timeout_s: float = 5.0,
+                tolerance_m: float | None = None) -> bool:
+        tolerance = MOVE_TOLERANCE_M if tolerance_m is None else tolerance_m
+        target_R = self._mink.SO3.from_z_radians(yaw_rad) @ self.home_rotation
+        start = self.data.site(GRASP_SITE).xpos.copy()
+        goal = np.asarray(pos_m, dtype=float)
+
+        distance = float(np.linalg.norm(goal - start))
+        steps = max(1, int(distance / (CARTESIAN_SPEED_MS * self.model.opt.timestep)))
+        steps = min(steps, int(timeout_s / self.model.opt.timestep))
+
+        for i in range(1, steps + 1):
+            waypoint = start + (goal - start) * (i / steps)
+            self._servo(waypoint, target_R)
+
+        # Close the loop on the measured TCP. The IK reference is accurate to a
+        # fraction of a millimetre, but the position actuators hold a ~1 cm
+        # steady-state error against gravity, so commanding the nominal goal is
+        # not enough. Offset the reference by the observed error and re-settle.
+        offset = np.zeros(3)
+        for _ in range(CORRECTION_ROUNDS + 1):
+            for _ in range(self.settle_steps):
+                self._servo(goal + offset, target_R)
+            error_vec = goal - self.data.site(GRASP_SITE).xpos
+            if float(np.linalg.norm(error_vec)) <= tolerance:
+                return True
+            offset = offset + error_vec
+
+        return float(np.linalg.norm(self.data.site(GRASP_SITE).xpos - goal)) <= tolerance
+
+    def open_gripper(self) -> None:
+        self._drive_gripper(GRIPPER_OPEN)
+
+    def close_gripper(self) -> None:
+        self._drive_gripper(GRIPPER_CLOSED)
+
+    def attach(self, obj_name: str) -> None:
+        """Activate the weld holding obj_name, at its current relative pose."""
+        eq = self.welds[obj_name]
+        body = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_BODY, obj_name)
+        pos, quat = self._relative_pose(self.hand_id, body)
+        self.model.eq_data[eq, :3] = 0.0
+        self.model.eq_data[eq, 3:6] = pos
+        self.model.eq_data[eq, 6:10] = quat
+        self.model.eq_data[eq, 10] = 1.0
+        self.data.eq_active[eq] = True
+        self.held = obj_name
+        self._step_physics(5)
+
+    def detach(self) -> None:
+        if self.held is None:
+            return
+        released = self.held
+        self.data.eq_active[self.welds[released]] = False
+        self.held = None
+        if self.drift_m:
+            # --inject-failure: nudge the object as it is released, once, so the
+            # agent's verification catches a placement that looks like it worked.
+            adr = object_qposadr(self.model, released)
+            self.data.qpos[adr] += self.drift_m
+            self.drift_m = 0.0
+            mujoco.mj_forward(self.model, self.data)
+        self._step_physics(self.settle_steps)
+
+    def home(self) -> bool:
+        return self.move_to(self.home_pos)
+
+    # -- internals -------------------------------------------------------
+    def _servo(self, position, rotation) -> None:
+        target = self._mink.SE3.from_rotation_and_translation(
+            rotation, np.asarray(position, dtype=float)
+        )
+        self.eef_task.set_target(target)
+        for _ in range(IK_MAX_ITERS):
+            velocity = self._mink.solve_ik(
+                self.configuration, self.tasks, self.model.opt.timestep,
+                IK_SOLVER, damping=1e-3,
+            )
+            self.configuration.integrate_inplace(velocity, self.model.opt.timestep)
+            err = self.eef_task.compute_error(self.configuration)
+            if (
+                np.linalg.norm(err[:3]) <= IK_POS_TOL_M
+                and np.linalg.norm(err[3:]) <= IK_ORI_TOL_RAD
+            ):
+                break
+        self.data.ctrl[:7] = self.configuration.q[:7]
+        self._step_physics(1)
+
+    def _drive_gripper(self, value: float, steps: int = 60) -> None:
+        self.data.ctrl[7] = value
+        self._step_physics(steps)
+
+    def _step_physics(self, n: int) -> None:
+        for _ in range(n):
+            mujoco.mj_step(self.model, self.data)
+        self.sync()
+
+    def _relative_pose(self, body1: int, body2: int):
+        """Pose of body2 expressed in body1's frame, as (pos, quat)."""
+        q1_inv = np.zeros(4)
+        mujoco.mju_negQuat(q1_inv, self.data.xquat[body1])
+        delta = self.data.xpos[body2] - self.data.xpos[body1]
+        pos = np.zeros(3)
+        mujoco.mju_rotVecQuat(pos, delta, q1_inv)
+        quat = np.zeros(4)
+        mujoco.mju_mulQuat(quat, q1_inv, self.data.xquat[body2])
+        return pos, quat
 
 
-class FloatingGripperBackend:
-    """Mocap body with two-finger geometry, moved directly. --backend floating."""
-
-    def __init__(self) -> None:
-        raise NotImplementedError("Phase 4 escape hatch")

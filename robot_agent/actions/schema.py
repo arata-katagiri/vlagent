@@ -34,7 +34,7 @@ DIRECTIONS = tuple(DIRECTION_VECTORS)
 MAX_PUSH_DISTANCE_M = 0.3
 PLACEMENT_TOLERANCE_M = 0.02
 LIFT_HEIGHT_M = 0.15
-APPROACH_HEIGHT_M = 0.10
+APPROACH_HEIGHT_M = 0.08
 
 # Arm workspace, measured from the base at the world origin.
 MIN_REACH_M = 0.25

@@ -23,6 +23,10 @@ from .schema import (
 MIN_LIFT_M = 0.03
 # A push must achieve at least this fraction of its predicted travel.
 MIN_PUSH_FRACTION = 0.5
+# How far below an object's top the gripper closes, in metres.
+GRASP_DEPTH_M = 0.025
+# Approach, lift and retreat only need to clear obstacles, not land precisely.
+CLEARANCE_TOLERANCE_M = 0.025
 
 
 # Clearance between two items sharing a surface, in metres.
@@ -262,21 +266,41 @@ def execute(
     return ActionResult(verified, detail, after)
 
 
+def _grasp_offset_z(state: dict, held: str | None) -> float:
+    """How far above the held object's centre the gripper is holding it.
+
+    Measured live rather than assumed, so it works for any backend and any grasp
+    height. Placing an object means putting the *gripper* at the object's
+    intended centre plus this offset.
+    """
+    if not held or held not in state["objects"]:
+        return 0.0
+    return state["gripper"]["position_m"][2] - state["objects"][held]["position_m"][2]
+
+
+
 def _run(call: ActionCall, backend: ArmBackend, state: dict) -> tuple[bool, str]:
     """Drive the backend through the motion for one call."""
     name, args = call.name, call.args
 
     if name == "pick":
         target = args["object"]
-        pos = list(state["objects"][target]["position_m"])
-        if not backend.move_to([pos[0], pos[1], pos[2] + APPROACH_HEIGHT_M]):
+        obj = state["objects"][target]
+        x, y, cz = obj["position_m"]
+        top = cz + obj["half_extent_m"][2]
+        # Grasp near the top of a tall object. Aiming at the centre of the glass
+        # drives the hand into its rim, because the object is taller than the
+        # gripper's reach below the grasp point.
+        grasp_z = max(cz, top - GRASP_DEPTH_M)
+
+        if not backend.move_to([x, y, top + APPROACH_HEIGHT_M], tolerance_m=CLEARANCE_TOLERANCE_M):
             return False, f"could not reach the approach pose above {target}"
         backend.open_gripper()
-        if not backend.move_to(pos):
+        if not backend.move_to([x, y, grasp_z]):
             return False, f"could not descend onto {target}"
         backend.close_gripper()
         backend.attach(target)
-        if not backend.move_to([pos[0], pos[1], pos[2] + LIFT_HEIGHT_M]):
+        if not backend.move_to([x, y, grasp_z + LIFT_HEIGHT_M], tolerance_m=CLEARANCE_TOLERANCE_M):
             return False, f"could not lift {target}"
         return True, ""
 
@@ -284,25 +308,30 @@ def _run(call: ActionCall, backend: ArmBackend, state: dict) -> tuple[bool, str]
         target = args["target"]
         held = state["gripper"]["holding"]
         drop = place_on_spot(state, target, held)
-        if not backend.move_to([drop[0], drop[1], drop[2] + APPROACH_HEIGHT_M]):
+        lift = _grasp_offset_z(state, held)
+        if not backend.move_to([drop[0], drop[1], drop[2] + lift + APPROACH_HEIGHT_M],
+                               tolerance_m=CLEARANCE_TOLERANCE_M):
             return False, f"could not reach the approach pose above {target}"
-        if not backend.move_to(drop):
+        if not backend.move_to([drop[0], drop[1], drop[2] + lift]):
             return False, f"could not descend onto {target}"
         backend.detach()
         backend.open_gripper()
-        backend.move_to([drop[0], drop[1], drop[2] + APPROACH_HEIGHT_M])
+        backend.move_to([drop[0], drop[1], drop[2] + lift + APPROACH_HEIGHT_M],
+                        tolerance_m=CLEARANCE_TOLERANCE_M)
         return True, f"released {held}"
 
     if name == "place_at":
         x, y = float(args["x_m"]), float(args["y_m"])
-        z = state["table_bounds_m"]["top_z"] + 0.02
-        if not backend.move_to([x, y, z + APPROACH_HEIGHT_M]):
+        held = state["gripper"]["holding"]
+        z = state["table_bounds_m"]["top_z"] + state["objects"][held]["half_extent_m"][2]
+        lift = _grasp_offset_z(state, held)
+        if not backend.move_to([x, y, z + lift + APPROACH_HEIGHT_M], tolerance_m=CLEARANCE_TOLERANCE_M):
             return False, "could not reach the approach pose above the target point"
-        if not backend.move_to([x, y, z]):
+        if not backend.move_to([x, y, z + lift]):
             return False, "could not descend to the target point"
         backend.detach()
         backend.open_gripper()
-        backend.move_to([x, y, z + APPROACH_HEIGHT_M])
+        backend.move_to([x, y, z + lift + APPROACH_HEIGHT_M], tolerance_m=CLEARANCE_TOLERANCE_M)
         return True, ""
 
     if name == "push":
@@ -312,7 +341,8 @@ def _run(call: ActionCall, backend: ArmBackend, state: dict) -> tuple[bool, str]
         pos = list(state["objects"][target]["position_m"])
         start = [pos[0] - dx * 0.06, pos[1] - dy * 0.06, pos[2]]
         backend.close_gripper()
-        if not backend.move_to([start[0], start[1], start[2] + APPROACH_HEIGHT_M]):
+        if not backend.move_to([start[0], start[1], start[2] + APPROACH_HEIGHT_M],
+                               tolerance_m=CLEARANCE_TOLERANCE_M):
             return False, f"could not reach the approach pose behind {target}"
         if not backend.move_to(start):
             return False, f"could not get behind {target}"

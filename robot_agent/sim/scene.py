@@ -28,8 +28,16 @@ CAMERA_NAME = "demo"
 # panda.xml has no sites at all (verified in Phase 0).
 GRASP_SITE = "grasp_site"
 
-# Measured at the `home` keyframe: finger-body midpoint relative to `hand`.
-TCP_OFFSET_M = (0.0, 0.0, 0.0584)
+# Where the grasp site sits inside the `hand` body, measured at `home`.
+#
+# The finger-body midpoint is 0.0584 m down the hand's local z, but the
+# collidable fingertip pads reach a further 0.053 m below that. Putting the site
+# at the midpoint means commanding the TCP to an object's centre drives the pads
+# 3 cm into the table, and the arm stalls against the contact. The site is
+# therefore placed at the pad centre, so "TCP at the object's centre" is a grasp
+# the fingers can actually close on.
+TCP_OFFSET_M = (0.0, 0.0, 0.1029)
+FINGER_MIDPOINT_OFFSET_M = 0.0584
 
 HAND_BODY = "hand"
 
@@ -68,20 +76,22 @@ OBJECTS: dict[str, dict] = {
     ),
     "cup": dict(
         kind="cylinder", half=(0.035, 0.035), rgba=(0.90, 0.75, 0.30, 1.0),
-        pos=(0.62, -0.22, 0.0), color="yellow", fragile=False, graspable=True,
+        pos=(0.52, -0.24, 0.0), color="yellow", fragile=False, graspable=True,
         aliases=("the cup", "mug"),
     ),
     "glass": dict(
         kind="cylinder", half=(0.026, 0.060), rgba=(0.75, 0.85, 0.95, 0.45),
-        pos=(0.60, 0.22, 0.0), color="clear", fragile=True, graspable=True,
+        pos=(0.50, 0.24, 0.0), color="clear", fragile=True, graspable=True,
         aliases=("the glass", "wine glass", "tumbler"),
     ),
 }
 
 # Fixed, not a free body: the "safe place".
+# Kept inside the arm's envelope: placing the 12 cm glass on a tray at radius
+# 0.68 m demands ~0.90 m of reach, past what the Panda has.
 TRAY = dict(
     half=(0.105, 0.085, 0.006), rgba=(0.30, 0.55, 0.65, 1.0),
-    pos=(0.68, -0.02, _T["top_z"] + 0.006),
+    pos=(0.57, -0.02, _T["top_z"] + 0.006),
 )
 
 GRASPABLE = tuple(n for n, o in OBJECTS.items() if o["graspable"])
@@ -221,7 +231,7 @@ def build_spec() -> mujoco.MjSpec:
     # Fixed camera that frames the arm and the whole table.
     cam = world.add_camera()
     cam.name = CAMERA_NAME
-    cam.pos = [1.62, -1.15, 1.42]
+    cam.pos = [1.78, -1.30, 1.52]
     cam.mode = mujoco.mjtCamLight.mjCAMLIGHT_TARGETBODY
     cam.targetbody = "table"
 

@@ -95,9 +95,63 @@ def filmstrip(
     return write_png(sheet, path)
 
 
-def recorder(path: str | Path, fps: int = 30):
+class Recorder:
+    """Pipes rendered frames to ffmpeg as an mp4.
+
+    The submission video comes from here rather than from a screen recording,
+    so a laggy window, a missing macOS permission, or a dropped capture cannot
+    ruin the one deliverable that gets judged. ffmpeg is already installed; this
+    avoids adding imageio as a dependency.
+    """
+
+    def __init__(self, model, path, camera=None, fps: int = 30,
+                 width: int = WIDTH, height: int = HEIGHT, every: int = 16):
+        self.path = Path(path)
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        self.camera = Camera(model, camera, width=width, height=height)
+        self.fps, self.every = fps, every
+        self._tick = 0
+        self.frames = 0
+        self._proc = None
+        self._cmd = [
+            "ffmpeg", "-y", "-loglevel", "error",
+            "-f", "rawvideo", "-pixel_format", "rgb24",
+            "-video_size", f"{width}x{height}", "-framerate", str(fps),
+            "-i", "-", "-c:v", "libx264", "-pix_fmt", "yuv420p",
+            str(self.path),
+        ]
+
+    def __enter__(self):
+        import subprocess  # noqa: PLC0415
+
+        self._proc = subprocess.Popen(self._cmd, stdin=subprocess.PIPE)
+        return self
+
+    def capture(self, data) -> None:
+        """Called from the backend's sync hook; decimated to the target fps."""
+        self._tick += 1
+        if self._tick % self.every:
+            return
+        if self._proc is None or self._proc.stdin is None:
+            return
+        try:
+            self._proc.stdin.write(self.camera.frame(data).tobytes())
+            self.frames += 1
+        except BrokenPipeError:
+            self._proc = None
+
+    def __exit__(self, *exc):
+        self.camera.close()
+        if self._proc is not None and self._proc.stdin is not None:
+            self._proc.stdin.close()
+            self._proc.wait()
+        return False
+
+
+def recorder(model, path, camera=None, **kw) -> Recorder:
     """Context manager writing frames to an mp4 through ffmpeg."""
-    raise NotImplementedError("Phase 5")
+    return Recorder(model, path, camera=camera, **kw)
 
 
-__all__ = ["Camera", "png", "filmstrip", "write_png", "recorder", "RUNS_DIR", "WIDTH", "HEIGHT"]
+__all__ = ["Camera", "Recorder", "png", "filmstrip", "write_png", "recorder",
+           "RUNS_DIR", "WIDTH", "HEIGHT"]

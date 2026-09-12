@@ -17,6 +17,7 @@ import argparse
 import json
 import os
 import time
+from contextlib import ExitStack
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -55,7 +56,9 @@ class RunLog:
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="robot_agent")
     p.add_argument("--mock-llm", action="store_true", help="offline scripted planner")
-    p.add_argument("--backend", choices=("panda", "floating", "mock"), default="panda")
+    p.add_argument("--backend", choices=("panda", "mock"), default="panda")
+    p.add_argument("--no-viewer", action="store_true",
+                   help="run the simulator headless (for recording and tests)")
     p.add_argument("--demo", action="store_true", help="run the scripted demo script")
     p.add_argument("--record", action="store_true", help="write an mp4 via ffmpeg")
     p.add_argument("--inject-failure", action="store_true",
@@ -64,18 +67,51 @@ def build_parser() -> argparse.ArgumentParser:
     return p
 
 
-def build_world(args):
-    """Return (get_state, backend, viewer_sync). Only `panda`/`floating` need MuJoCo."""
+def build_world(args, stack):
+    """Return (get_state, backend). `mock` needs no simulator and no viewer."""
+    drift = 0.08 if args.inject_failure else 0.0
+
     if args.backend == "mock":
         from ..sim.backends import MockBackend, initial_state  # noqa: PLC0415
 
         state = initial_state()
-        backend = MockBackend(state, drift_m=0.08 if args.inject_failure else 0.0)
-        return (lambda: state), backend, None
+        return (lambda: state), MockBackend(state, drift_m=drift)
 
-    raise NotImplementedError(
-        f"--backend {args.backend} arrives in Phase 4; use --backend mock for now"
-    )
+    from ..sim.backends import PandaIKBackend  # noqa: PLC0415
+    from ..sim.render import RUNS_DIR, recorder  # noqa: PLC0415
+    from ..sim.scene import CAMERA_NAME, build_scene, settle  # noqa: PLC0415
+    from ..sim.world_state import get_world_state  # noqa: PLC0415
+
+    model, data = build_scene()
+    settle(model, data, 0.3)
+
+    hooks = []
+    if not args.no_viewer:
+        import mujoco.viewer  # noqa: PLC0415
+
+        viewer = stack.enter_context(
+            mujoco.viewer.launch_passive(
+                model, data, show_left_ui=False, show_right_ui=False
+            )
+        )
+        viewer.cam.fixedcamid = mujoco.mj_name2id(
+            model, mujoco.mjtObj.mjOBJ_CAMERA, CAMERA_NAME
+        )
+        viewer.cam.type = mujoco.mjtCamera.mjCAMERA_FIXED
+        hooks.append(viewer.sync)
+
+    if args.record:
+        path = RUNS_DIR / f"{datetime.now(timezone.utc):%Y%m%dT%H%M%SZ}.mp4"
+        rec = stack.enter_context(recorder(model, path, camera=CAMERA_NAME))
+        hooks.append(lambda: rec.capture(data))
+        ui.note(f"recording to {path}")
+
+    def sync():
+        for hook in hooks:
+            hook()
+
+    backend = PandaIKBackend(model, data, sync=sync, drift_m=drift)
+    return (lambda: get_world_state(model, data)), backend
 
 
 def run_command(command: str, get_state, backend, llm, log: RunLog) -> None:
@@ -226,31 +262,32 @@ def main() -> None:
 
     llm = build_llm(args.mock_llm)
     model = "mock" if args.mock_llm else os.environ.get("OPENAI_MODEL", "unset")
-    get_state, backend, _ = build_world(args)
     log = RunLog(enabled=not args.no_log)
 
-    ui.banner(args.backend, model)
-    ui.scene(get_state())
+    with ExitStack() as stack:
+        get_state, backend = build_world(args, stack)
 
-    commands = DEMO_SCRIPT if args.demo else None
-    if commands:
-        for command in commands:
-            ui.console.rule(f"[bold]{command}")
+        ui.banner(args.backend, model)
+        ui.scene(get_state())
+
+        if args.demo:
+            for command in DEMO_SCRIPT:
+                ui.console.rule(f"[bold]{command}")
+                run_command(command, get_state, backend, llm, log)
+                ui.scene(get_state())
+            ui.note(f"demo complete; log written to {log.path}")
+            return
+
+        while True:
+            try:
+                command = ui.console.input("\n[bold cyan]you >[/bold cyan] ").strip()
+            except (EOFError, KeyboardInterrupt):
+                break
+            if not command:
+                continue
+            if command.lower() in ("quit", "exit"):
+                break
             run_command(command, get_state, backend, llm, log)
-            ui.scene(get_state())
-        ui.note(f"demo complete; log written to {log.path}")
-        return
-
-    while True:
-        try:
-            command = ui.console.input("\n[bold cyan]you >[/bold cyan] ").strip()
-        except (EOFError, KeyboardInterrupt):
-            break
-        if not command:
-            continue
-        if command.lower() in ("quit", "exit"):
-            break
-        run_command(command, get_state, backend, llm, log)
 
     ui.note(f"log written to {log.path}")
 

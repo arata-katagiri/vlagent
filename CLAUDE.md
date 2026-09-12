@@ -231,9 +231,8 @@ Three backends behind one `ArmBackend` Protocol. Build them in this order:
   `PostureTask`, iterate `solve_ik` + `integrate_inplace` to convergence, then
   `data.ctrl = configuration.q[:8]` and `mj_step`. This is the shape of mink's own `arm_panda.py`; read
   it, do not reinvent it. A reference clone sits at `~/Documents/my_projects/mink` (outside this repo).
-- **`FloatingGripperBackend` (escape hatch).** A mocap body with two-finger geometry moved directly,
-  same interface, `--backend floating`. **Hard cutoff: if Panda IK is not doing a reliable
-  pick-and-place by 2:15 PM, switch and move on.**
+- ~~`FloatingGripperBackend` (escape hatch)~~ — **not needed and not built.** The IK backend picks and
+  places all five objects reliably, so `--backend` is just `panda` or `mock`.
 
 Grasping:
 
@@ -249,7 +248,13 @@ Grasping:
   **Place:** move above target, descend to target top + half object height + 1 cm, detach, open, retreat.
 - Top-down grasps only; only yaw varies.
 - Interpolate waypoints so motion looks smooth at roughly real time.
-- `move_to` returns False if position error is not under 1 cm within the timeout.
+- `move_to` returns False if position error is not under 1 cm within the timeout. Clearance waypoints
+  (approach, lift, retreat) pass a looser 2.5 cm: carrying a load at reach leaves ~1.2 cm of droop,
+  which matters for a grasp and not at all for lifting clear of the table.
+- Measured facts that the geometry depends on: the collidable fingertip pads reach 0.053 m below the
+  finger-body midpoint, so the grasp site sits at the pad centre (0.1029 m down the hand's local z);
+  tall objects are grasped `GRASP_DEPTH_M` below their top rather than at their centre; and the tray
+  sits at radius 0.57 m because placing the 12 cm glass further out exceeds the arm's envelope.
 
 ## 9. App and demo
 
