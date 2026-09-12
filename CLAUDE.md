@@ -196,11 +196,26 @@ Safety rules:
 LLM system prompt must say: act only through tools; never invent objects; resolve references using the
 scene state; ask instead of guessing when ambiguity matters; safety is enforced externally.
 
-LLM client: OpenAI-compatible (`openai` SDK). `OPENAI_BASE_URL`, `OPENAI_API_KEY`, `OPENAI_MODEL` from
-`.env`, so we can switch between the event's OpenAI credits, OpenRouter, or a local endpoint without
-code changes. 30 s timeout, one retry. `MockLLM` maps the demo commands (section 9) to fixed plans so
-everything runs offline. The installed `openai` SDK is 3.x — read its tool-calling signature before
-writing the client rather than assuming.
+LLM client: OpenAI-compatible (`openai` SDK 3.13, verified working). `OPENAI_BASE_URL`,
+`OPENAI_API_KEY`, `OPENAI_MODEL` from `.env`. 30 s timeout, one retry. `MockLLM` maps the demo
+commands (section 9) to fixed plans so everything runs offline.
+
+**Provider, settled in Phase 0.** The event's OpenAI credits are Codex-only, not API, so we use
+OpenRouter (`https://openrouter.ai/api/v1`). The key works but the account has **zero credits**, so
+paid models will start returning 402. Measured against our real `propose_plan` schema:
+
+| Model | Latency | Behaviour |
+|---|---|---|
+| `nex-agi/nex-n2.5-pro:free` | ~10 s | correct 4-step plan on every trial — **our default** |
+| `nex-agi/nex-n2.5-mini:free` | ~3 s | sometimes emits `place_on` with nothing held |
+| `openai/gpt-4o-mini` | ~2 s | reliable, but needs credits topped up |
+
+Free models are rate limited and occasionally 429. Develop against `--mock-llm` and spend the quota on
+demo runs. Topping up ~$5 of OpenRouter credit would buy a 2 s planner for the video; ask the human.
+
+**The tool schema must pin `name` to an enum of the six action names.** Unconstrained, `gpt-4o`
+invented a `locate_red_block` step on the first try. The enum plus the symbolic validator in section 7
+step 3 is what keeps a hallucinated plan out of the executor.
 
 ## 8. Controller notes
 
