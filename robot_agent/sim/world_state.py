@@ -96,8 +96,10 @@ def get_world_state(model, data) -> dict:
     objects: dict[str, dict] = {}
     for name, pos in positions.items():
         item = ITEMS[name]
+        hx, hy = footprint(item)
         objects[name] = {
             "position_m": [round(float(v), 4) for v in pos],
+            "half_extent_m": [round(hx, 4), round(hy, 4), round(half_height(item), 4)],
             "color": item["color"],
             "fragile": bool(item["fragile"]),
             "graspable": bool(item["graspable"]),

@@ -201,17 +201,18 @@ LLM client: OpenAI-compatible (`openai` SDK 3.13, verified working). `OPENAI_BAS
 commands (section 9) to fixed plans so everything runs offline.
 
 **Provider, settled in Phase 0.** The event's OpenAI credits are Codex-only, not API, so we use
-OpenRouter (`https://openrouter.ai/api/v1`). The key works but the account has **zero credits**, so
-paid models will start returning 402. Measured against our real `propose_plan` schema:
+OpenRouter (`https://openrouter.ai/api/v1`). A $5 promo code was redeemed and paid models now work.
+Measured against our real `propose_plan` schema:
 
 | Model | Latency | Behaviour |
 |---|---|---|
-| `nex-agi/nex-n2.5-pro:free` | ~10 s | correct 4-step plan on every trial — **our default** |
-| `nex-agi/nex-n2.5-mini:free` | ~3 s | sometimes emits `place_on` with nothing held |
-| `openai/gpt-4o-mini` | ~2 s | reliable, but needs credits topped up |
+| `openai/gpt-4o-mini` | ~5 s | correct 4-step plan — **our default** |
+| `openai/gpt-4o` | ~4 s | correct, roughly 10x the cost |
+| `nex-agi/nex-n2.5-pro:free` | ~10 s | correct, needs no credits — fallback if billing fails |
 
-Free models are rate limited and occasionally 429. Develop against `--mock-llm` and spend the quota on
-demo runs. Topping up ~$5 of OpenRouter credit would buy a 2 s planner for the video; ask the human.
+Caveat: after the promo was redeemed the API still reports `is_free_tier: true` and
+`total_credits: 0`, while paid calls succeed. If paid models start returning 402 mid-event, switch
+`OPENAI_MODEL` to the free fallback and carry on. Develop against `--mock-llm` either way.
 
 **The tool schema must pin `name` to an enum of the six action names.** Unconstrained, `gpt-4o`
 invented a `locate_red_block` step on the first try. The enum plus the symbolic validator in section 7

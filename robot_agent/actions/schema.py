@@ -19,12 +19,26 @@ class Safety(StrEnum):
     IRREVERSIBLE = "irreversible"
 
 
-# Directions accepted by push().
-DIRECTIONS = ("left", "right", "forward", "back")
+# Directions accepted by push(), as (dx, dy) unit vectors in world metres.
+# The arm sits at the origin looking down +x, so "forward" is away from the base
+# and "left" is +y from the user's point of view.
+DIRECTION_VECTORS: dict[str, tuple[float, float]] = {
+    "forward": (1.0, 0.0),
+    "back": (-1.0, 0.0),
+    "left": (0.0, 1.0),
+    "right": (0.0, -1.0),
+}
+DIRECTIONS = tuple(DIRECTION_VECTORS)
 
 # Bounds, in metres.
 MAX_PUSH_DISTANCE_M = 0.3
 PLACEMENT_TOLERANCE_M = 0.02
+LIFT_HEIGHT_M = 0.15
+APPROACH_HEIGHT_M = 0.10
+
+# Arm workspace, measured from the base at the world origin.
+MIN_REACH_M = 0.25
+MAX_REACH_M = 0.80
 
 
 @dataclass
@@ -43,3 +57,80 @@ class ActionResult:
     ok: bool
     reason: str
     state_after: dict
+
+
+# name -> (required arg names, one-line description for the LLM).
+ACTIONS: dict[str, tuple[tuple[str, ...], str]] = {
+    "pick": (("object",), "Grasp an object that is free on top and within reach."),
+    "place_on": (("target",), "Place the held object on top of a target object."),
+    "place_at": (("x_m", "y_m"), "Place the held object at a point on the table."),
+    "push": (
+        ("object", "direction", "distance_m"),
+        "Push an object along the table in one of four directions.",
+    ),
+    "home": ((), "Return the arm to its rest pose."),
+    "ask_user": (("question",), "Ask the user a question when a reference is ambiguous."),
+}
+ACTION_NAMES = tuple(ACTIONS)
+
+
+def plan_tool_schema() -> list[dict]:
+    """The tool definitions handed to the LLM.
+
+    `name` is pinned to an enum of the six real actions. Without it, models invent
+    plausible-sounding steps -- gpt-4o proposed a `locate_red_block` on the first
+    try during Phase 0. The enum plus the symbolic validator keeps a hallucinated
+    plan out of the executor.
+    """
+    step = {
+        "type": "object",
+        "properties": {
+            "name": {"type": "string", "enum": list(ACTION_NAMES)},
+            "args": {"type": "object", "description": "Arguments for this action."},
+            "rationale": {
+                "type": "string",
+                "description": "One short sentence on why this step is needed.",
+            },
+        },
+        "required": ["name", "args", "rationale"],
+    }
+    return [
+        {
+            "type": "function",
+            "function": {
+                "name": "propose_plan",
+                "description": "Propose the complete plan of physical actions.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "steps": {"type": "array", "items": step},
+                        "summary": {
+                            "type": "string",
+                            "description": "One sentence describing the plan to the user.",
+                        },
+                    },
+                    "required": ["steps", "summary"],
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "ask_user",
+                "description": "Ask the user to resolve a genuinely ambiguous reference.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {"question": {"type": "string"}},
+                    "required": ["question"],
+                },
+            },
+        },
+    ]
+
+
+__all__ = [
+    "Safety", "ActionCall", "ActionResult", "ACTIONS", "ACTION_NAMES",
+    "DIRECTIONS", "DIRECTION_VECTORS", "MAX_PUSH_DISTANCE_M",
+    "PLACEMENT_TOLERANCE_M", "LIFT_HEIGHT_M", "APPROACH_HEIGHT_M",
+    "MIN_REACH_M", "MAX_REACH_M", "plan_tool_schema",
+]
