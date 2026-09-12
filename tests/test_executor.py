@@ -153,3 +153,39 @@ def test_place_on_spot_is_stable_for_an_empty_surface(state):
     spot = place_on_spot(state, "tray", "red_block")
     tray = state["objects"]["tray"]
     assert spot[:2] == pytest.approx(tray["position_m"][:2])
+
+
+# --- plans that achieve nothing -----------------------------------------
+
+def test_picking_an_object_and_putting_it_straight_back_is_rejected(state):
+    """The bug behind "remove the red cube from the table": every step was
+    individually legal, so the agent reported success for a no-op."""
+    tray = state["objects"]["tray"]
+    red = state["objects"]["red_block"]
+    red["position_m"] = [
+        tray["position_m"][0],
+        tray["position_m"][1],
+        round(tray["position_m"][2] + tray["half_extent_m"][2] + red["half_extent_m"][2], 4),
+    ]
+    red["on_top_of"] = "tray"
+    tray["supporting"] = ["red_block"]
+
+    plan = [call("pick", object="red_block"), call("place_on", target="tray")]
+    problems = validate_plan(plan, state)
+    assert problems and "leave the scene exactly as it is" in problems[0]
+
+
+def test_a_plan_that_actually_moves_something_is_not_a_no_op(state):
+    from robot_agent.actions.executor import is_no_op
+
+    assert not is_no_op(
+        [call("pick", object="red_block"), call("place_on", target="tray")], state
+    )
+
+
+def test_home_and_ask_user_are_not_treated_as_no_ops(state):
+    from robot_agent.actions.executor import is_no_op
+
+    assert not is_no_op([call("home")], state)
+    assert not is_no_op([call("ask_user", question="which one?")], state)
+    assert validate_plan([call("home")], state) == []

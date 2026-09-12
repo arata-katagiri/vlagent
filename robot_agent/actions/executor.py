@@ -27,6 +27,8 @@ MIN_PUSH_FRACTION = 0.5
 GRASP_DEPTH_M = 0.025
 # Approach, lift and retreat only need to clear obstacles, not land precisely.
 CLEARANCE_TOLERANCE_M = 0.025
+# Below this, a plan's net effect counts as no change at all.
+NO_OP_TOLERANCE_M = 0.01
 
 
 # Clearance between two items sharing a surface, in metres.
@@ -163,6 +165,32 @@ def classify_plan(plan: list[ActionCall], state: dict) -> list[tuple[Safety, str
     return levels
 
 
+def is_no_op(plan: list[ActionCall], state: dict) -> bool:
+    """Whether the plan would leave the world materially unchanged.
+
+    Picking an object up and setting it back down where it already was passes
+    every precondition, so without this check the agent reports "Done, every
+    step was verified" for a plan that achieved nothing. Plans made only of
+    home/ask_user are exempt: those are legitimately not about moving anything.
+    """
+    if not plan or all(c.name in ("home", "ask_user") for c in plan):
+        return False
+
+    final = state
+    for call in plan:
+        final = _apply_effects(call, final)
+
+    if final["gripper"]["holding"] != state["gripper"]["holding"]:
+        return False
+    for name, obj in state["objects"].items():
+        after = final["objects"].get(name)
+        if after is None:
+            return False
+        if math.dist(obj["position_m"], after["position_m"]) > NO_OP_TOLERANCE_M:
+            return False
+    return True
+
+
 def validate_plan(plan: list[ActionCall], state: dict) -> list[str]:
     """Symbolically check the whole plan in order. Empty list means valid."""
     problems: list[str] = []
@@ -171,6 +199,13 @@ def validate_plan(plan: list[ActionCall], state: dict) -> list[str]:
         for reason in check_preconditions(call, current):
             problems.append(f"step {i} ({call.name}): {reason}")
         current = _apply_effects(call, current)
+
+    if not problems and is_no_op(plan, state):
+        problems.append(
+            "this plan would leave the scene exactly as it is; it does not achieve "
+            "anything. Either propose a plan that actually changes something, or "
+            "use ask_user to say what you cannot do."
+        )
     return problems
 
 
@@ -360,7 +395,8 @@ def _run(call: ActionCall, backend: ArmBackend, state: dict) -> tuple[bool, str]
 
 
 __all__ = [
-    "validate_plan", "classify_plan", "execute", "classify", "check_preconditions",
+    "validate_plan", "classify_plan", "is_no_op", "execute", "classify",
+    "check_preconditions",
     "place_on_spot",
     "ActionCall", "ActionResult", "Safety",
 ]

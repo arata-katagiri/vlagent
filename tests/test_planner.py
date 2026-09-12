@@ -134,3 +134,25 @@ def test_describe_state_marks_the_facts_the_agent_must_respect(state):
     assert "supporting green_block" in text
     assert "on top of red_block" in text
     assert "holding nothing" in text
+
+
+# --- the model must be told the argument keys ---------------------------
+
+def test_the_action_catalogue_names_every_action_and_its_keys():
+    from robot_agent.actions.schema import ACTION_NAMES, describe_actions
+
+    catalogue = describe_actions()
+    for name in ACTION_NAMES:
+        assert name in catalogue, f"{name} missing from the catalogue"
+    assert '"object": "red_block"' in catalogue
+    assert "distance_m: float in (0, 0.3]" in catalogue
+
+
+def test_the_system_prompt_carries_the_catalogue_and_the_no_bin_rule():
+    from robot_agent.agent.llm import SYSTEM_PROMPT
+
+    # Without these, models emit steps with empty args and propose no-op plans.
+    assert "required keys in args: object" in SYSTEM_PROMPT
+    assert "An empty args object is never valid" in SYSTEM_PROMPT
+    assert "no bin" in SYSTEM_PROMPT
+    assert "net effect is nothing" in SYSTEM_PROMPT
