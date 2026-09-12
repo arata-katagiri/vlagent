@@ -130,7 +130,7 @@ def test_describe_state_marks_the_facts_the_agent_must_respect(state):
     state["objects"]["green_block"]["on_top_of"] = "red_block"
     text = describe_state(state)
     assert "FRAGILE" in text                      # the glass
-    assert "fixed, cannot be picked up" in text   # the tray
+    assert "tray" not in text.split("can be picked up:")[1].split("\n")[0]  # the tray
     assert "supporting green_block" in text
     assert "on top of red_block" in text
     assert "holding nothing" in text
@@ -199,10 +199,16 @@ def test_flat_and_nested_arguments_are_both_accepted():
     assert steps[1].args == {"target": "tray"}
 
 
-def test_the_scene_description_says_what_can_be_stacked_on(state):
+def test_capabilities_are_listed_as_names_not_tagged_on_each_object(state):
+    """As per-object tags the model read these directionally: "tray [fixed,
+    cannot be picked up]" became a reason it could not place something *onto*
+    the tray, and "cup [not a valid target]" blocked carrying the cup at all."""
     text = describe_state(state)
-    assert "cup (yellow)" in text
     cup_line = next(l for l in text.splitlines() if l.strip().startswith("cup "))
-    assert "nothing can be placed on it" in cup_line
     tray_line = next(l for l in text.splitlines() if l.strip().startswith("tray "))
-    assert "can be stacked on" in tray_line
+    assert "target" not in cup_line and "picked up" not in tray_line
+
+    picked = next(l for l in text.splitlines() if l.startswith("can be picked up:"))
+    targets = next(l for l in text.splitlines() if l.startswith("can be placed onto"))
+    assert "cup" in picked and "tray" not in picked
+    assert "tray" in targets and "cup" not in targets

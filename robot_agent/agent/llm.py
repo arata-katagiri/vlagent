@@ -31,9 +31,14 @@ Choosing a tool:
 - A question about the scene ("what is on the table?", "is anything fragile?",
   "is there something yellow?") is answered with the answer tool. Answer it from
   the scene state you were given. Do not turn a question back into a question.
-- Something you cannot do ("put the block in the cup" -- you can only place onto
-  the flat surfaces marked "can be stacked on") is explained with the answer tool.
-  Do not offer an alternative the scene says is impossible.
+- Something you cannot do is explained with the answer tool. Objects may only be
+  set down on the listed place_on targets; that list is about destinations, not
+  about which objects can be carried, and only if the carried object's
+  Note the direction: an object that is not a valid place_on target can still be
+  picked up and put somewhere else.
+- Do not refuse on your own guess about whether something will fit or balance.
+  Propose the plan; the safety checker measures it and will tell you if it fails.
+  Only refuse outright for what the scene state plainly rules out.
 - ask_user is only for a genuine ambiguity where their reply changes which action
   you would take.
 - propose_plan is only for actually moving something.
@@ -121,12 +126,6 @@ def describe_state(state: dict) -> str:
         tags = []
         if obj["fragile"]:
             tags.append("FRAGILE")
-        if not obj["graspable"]:
-            tags.append("fixed, cannot be picked up")
-        if name in STACKABLE_TARGETS:
-            tags.append("can be stacked on")
-        else:
-            tags.append("nothing can be placed on it")
         if obj["on_top_of"]:
             tags.append(f"on top of {obj['on_top_of']}")
         if obj["supporting"]:
@@ -139,6 +138,26 @@ def describe_state(state: dict) -> str:
             tags.append("off the table")
         suffix = f" [{'; '.join(tags)}]" if tags else ""
         lines.append(f"  {name} ({obj['color']}) at {_xyz(obj['position_m'])}{suffix}")
+
+    # A standalone list of destinations, not a tag on each object. As a per-object
+    # tag ("not a valid place_on target") the model read it as a property of the
+    # object itself and refused to put the cup *onto* anything.
+    # Capabilities are listed as names, not tagged onto each object's line. As a
+    # per-object tag the model read them as properties of the object in whatever
+    # role the sentence put it in: "tray [fixed, cannot be picked up]" became a
+    # reason it could not place something *onto* the tray.
+    lines.append(
+        "can be picked up: "
+        + ", ".join(n for n, o in state["objects"].items() if o["graspable"])
+    )
+    lines.append(
+        "can be placed onto (the only valid place_on targets): "
+        + ", ".join(n for n in state["objects"] if n in STACKABLE_TARGETS)
+    )
+    lines.append(
+        "these two lists are independent: an object may be liftable but not a "
+        "target, or a target but not liftable."
+    )
     return "\n".join(lines)
 
 

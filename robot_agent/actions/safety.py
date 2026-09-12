@@ -61,6 +61,29 @@ def overhang_m(state: dict, x_m: float, y_m: float) -> float:
     )
 
 
+# How far a stacked object may overhang its support on each side, in metres.
+STACK_OVERHANG_M = 0.01
+
+
+def stacking_overhang(state: dict, held: str, target: str) -> tuple[float, float] | None:
+    """Return (held width, target width) if `held` would not balance on `target`.
+
+    None means it fits. Without this, "put the cup on the red block" passes every
+    other precondition and the cup topples off a support less than half its width.
+    """
+    held_obj = state["objects"].get(held)
+    target_obj = state["objects"].get(target)
+    if not held_obj or not target_obj:
+        return None
+    hx, hy, _ = held_obj.get("half_extent_m", (0.0, 0.0, 0.0))
+    tx, ty, _ = target_obj.get("half_extent_m", (0.0, 0.0, 0.0))
+    if not (tx or ty):
+        return None
+    if hx <= tx + STACK_OVERHANG_M and hy <= ty + STACK_OVERHANG_M:
+        return None
+    return 2 * max(hx, hy), 2 * max(tx, ty)
+
+
 def check_preconditions(call: ActionCall, state: dict) -> list[str]:
     """Return human-readable reasons the call cannot run now. Empty means OK."""
     name, args = call.name, call.args
@@ -105,6 +128,14 @@ def check_preconditions(call: ActionCall, state: dict) -> list[str]:
                 problems.append(f"{target} is not a flat surface to stack on")
             if target == holding:
                 problems.append(f"cannot place {target} on itself")
+            elif holding is not None:
+                fit = stacking_overhang(state, holding, target)
+                if fit is not None:
+                    held_w, target_w = fit
+                    problems.append(
+                        f"{holding} is {held_w:.2f} m across and {target} is only "
+                        f"{target_w:.2f} m across; it would not balance"
+                    )
 
     elif name == "place_at":
         if holding is None:
@@ -190,6 +221,6 @@ def classify(call: ActionCall, state: dict) -> tuple[Safety, str]:
 
 
 __all__ = [
-    "check_preconditions", "classify", "reachable", "off_table",
+    "check_preconditions", "classify", "reachable", "off_table", "stacking_overhang",
     "overhang_m", "predict_push_end", "STACKABLE_TARGETS",
 ]

@@ -169,3 +169,24 @@ def test_reachable_annulus():
     assert not reachable(0.05, 0.0)
     assert reachable(0.5, 0.0)
     assert not reachable(1.2, 0.0)
+
+
+def test_a_wide_object_will_not_balance_on_a_narrow_one(state):
+    """"Put the cup on the red cube" is legal in every other respect, but a 7 cm
+    cup does not balance on a 4 cm block."""
+    state["gripper"]["holding"] = "cup"
+    state["objects"]["cup"]["held"] = True
+    problems = check_preconditions(call("place_on", target="red_block"), state)
+    assert any("would not balance" in p for p in problems)
+
+
+def test_a_wide_object_still_fits_on_a_large_surface(state):
+    state["gripper"]["holding"] = "cup"
+    state["objects"]["cup"]["held"] = True
+    assert check_preconditions(call("place_on", target="tray"), state) == []
+
+
+def test_same_sized_blocks_can_be_stacked(state):
+    state["gripper"]["holding"] = "red_block"
+    state["objects"]["red_block"]["held"] = True
+    assert check_preconditions(call("place_on", target="blue_block"), state) == []
