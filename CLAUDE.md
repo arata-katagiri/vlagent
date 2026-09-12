@@ -294,6 +294,11 @@ wait for human confirmation.** Never claim something works without having run it
 | 5 | 2:15–2:30 | Confirmation flow polish, `--demo`, `--record`, `--inject-failure` if time. **Feature freeze at 2:30.** Commit. |
 | 6 | 2:30–3:00 | README (setup, architecture, "Built during the hackathon", credits for MuJoCo, Menagerie, mink), recording, submission. |
 
+**Outcome.** All six phases shipped. The agent loop runs on both backends; the Panda IK backend
+picks and places all five objects, so the floating-gripper escape hatch was never needed. 62 tests
+pass headless. `--demo --record` produces the robot-motion mp4 under `runs/`; the 2-minute
+submission video is that plus a screen recording of the terminal.
+
 Phase order is priority order. If a phase overruns, cut from Phase 5 first, then Phase 4 (ship on
 `--backend floating`, or in the worst case `mock`). Phase 3 must happen: without it there is no agent.
 
