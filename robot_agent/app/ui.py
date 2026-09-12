@@ -126,6 +126,10 @@ def question(text: str) -> None:
     console.print(Panel(Text(text), title="the agent needs a clarification", border_style="yellow"))
 
 
+def answer(text: str) -> None:
+    console.print(Panel(Text(text), title="answer", border_style="cyan"))
+
+
 def report(text: str, ok: bool = True) -> None:
     console.print(Panel(Text(text), border_style="green" if ok else "red", title="result"))
 
@@ -135,4 +139,4 @@ def note(text: str) -> None:
 
 
 __all__ = ["console", "banner", "scene", "plan", "rejected", "confirm",
-           "step_result", "question", "report", "note", "badge"]
+           "step_result", "question", "answer", "report", "note", "badge"]

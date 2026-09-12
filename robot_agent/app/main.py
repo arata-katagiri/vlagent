@@ -122,11 +122,17 @@ def run_command(command: str, get_state, backend, llm, log: RunLog) -> None:
     outcome = planner.plan(command, state, llm)
     log.write("plan", attempts=outcome.attempts, ok=outcome.ok,
               steps=[(s.name, s.args) for s in outcome.steps],
-              summary=outcome.summary, problems=outcome.problems)
+              summary=outcome.summary, problems=outcome.problems,
+              answer=outcome.answer, question=outcome.question)
 
     for steps, problems in outcome.rejected:
         ui.rejected(steps, problems)
         log.write("plan_rejected", steps=[s.name for s in steps], problems=problems)
+
+    if outcome.answer:
+        ui.answer(outcome.answer)
+        log.write("answer", text=outcome.answer)
+        return
 
     if outcome.question:
         ui.question(outcome.question)

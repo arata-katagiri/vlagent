@@ -156,3 +156,53 @@ def test_the_system_prompt_carries_the_catalogue_and_the_no_bin_rule():
     assert "An empty args object is never valid" in SYSTEM_PROMPT
     assert "no bin" in SYSTEM_PROMPT
     assert "net effect is nothing" in SYSTEM_PROMPT
+
+
+# --- answering, rather than bouncing every question back ----------------
+
+def test_an_answer_is_surfaced_and_is_not_an_executable_plan(state):
+    from robot_agent.agent.llm import Answer
+
+    llm = ScriptedLLM(Answer(text="On the table: red_block, cup, glass."))
+    outcome = planner.plan("what is on the table?", state, llm)
+    assert outcome.answer == "On the table: red_block, cup, glass."
+    assert outcome.steps == [] and not outcome.ok and outcome.question is None
+
+
+def test_mock_llm_answers_a_scene_question_instead_of_asking_one(state):
+    from robot_agent.agent.llm import Answer, MockLLM
+
+    reply = MockLLM().propose("tell me what's on the table", state)
+    assert isinstance(reply, Answer)
+    assert "red_block" in reply.text
+
+
+def test_the_tool_schema_uses_flat_named_arguments(state):
+    """A nested free-form args object made models emit `args: {}`."""
+    from robot_agent.actions.schema import plan_tool_schema
+
+    tools = plan_tool_schema()
+    assert {t["function"]["name"] for t in tools} == {"propose_plan", "answer", "ask_user"}
+    props = tools[0]["function"]["parameters"]["properties"]["steps"]["items"]["properties"]
+    for key in ("object", "target", "x_m", "y_m", "direction", "distance_m"):
+        assert key in props, f"{key} must be a named property, not nested under args"
+
+
+def test_flat_and_nested_arguments_are_both_accepted():
+    from robot_agent.agent.llm import _steps_from_args
+
+    steps = _steps_from_args({"steps": [
+        {"name": "pick", "object": "red_block", "rationale": "flat"},
+        {"name": "place_on", "args": {"target": "tray"}, "rationale": "nested"},
+    ]})
+    assert steps[0].args == {"object": "red_block"}
+    assert steps[1].args == {"target": "tray"}
+
+
+def test_the_scene_description_says_what_can_be_stacked_on(state):
+    text = describe_state(state)
+    assert "cup (yellow)" in text
+    cup_line = next(l for l in text.splitlines() if l.strip().startswith("cup "))
+    assert "nothing can be placed on it" in cup_line
+    tray_line = next(l for l in text.splitlines() if l.strip().startswith("tray "))
+    assert "can be stacked on" in tray_line

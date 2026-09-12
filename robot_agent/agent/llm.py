@@ -15,7 +15,8 @@ import json
 import os
 from dataclasses import dataclass, field
 
-from ..actions.schema import ActionCall, describe_actions, plan_tool_schema
+from ..actions.safety import STACKABLE_TARGETS
+from ..actions.schema import ARG_KEYS, ActionCall, describe_actions, plan_tool_schema
 
 TIMEOUT_S = 30.0
 MAX_RETRIES = 1
@@ -25,6 +26,17 @@ You control a real robot arm above a table. Act only through the provided tools.
 
 Actions, with the exact argument keys you must use:
 {actions}
+
+Choosing a tool:
+- A question about the scene ("what is on the table?", "is anything fragile?",
+  "is there something yellow?") is answered with the answer tool. Answer it from
+  the scene state you were given. Do not turn a question back into a question.
+- Something you cannot do ("put the block in the cup" -- you can only place onto
+  the flat surfaces marked "can be stacked on") is explained with the answer tool.
+  Do not offer an alternative the scene says is impossible.
+- ask_user is only for a genuine ambiguity where their reply changes which action
+  you would take.
+- propose_plan is only for actually moving something.
 
 Rules:
 - Never invent objects or action names. Use exactly the names in the scene state.
@@ -59,6 +71,18 @@ class Plan:
 @dataclass
 class Question:
     """The model needs the user to disambiguate before it can plan."""
+
+    text: str
+
+
+@dataclass
+class Answer:
+    """A direct reply, with nothing to execute.
+
+    Questions about the scene are a normal thing to ask a home assistant. Without
+    this, every such request came back as a clarification, so "tell me what is on
+    the table" was answered with "do you want a full list?".
+    """
 
     text: str
 
@@ -99,6 +123,10 @@ def describe_state(state: dict) -> str:
             tags.append("FRAGILE")
         if not obj["graspable"]:
             tags.append("fixed, cannot be picked up")
+        if name in STACKABLE_TARGETS:
+            tags.append("can be stacked on")
+        else:
+            tags.append("nothing can be placed on it")
         if obj["on_top_of"]:
             tags.append(f"on top of {obj['on_top_of']}")
         if obj["supporting"]:
@@ -118,14 +146,29 @@ def _xyz(p) -> str:
     return f"({p[0]:.2f}, {p[1]:.2f}, {p[2]:.2f})"
 
 
+def _step_args(step: dict) -> dict:
+    """Collect a step's arguments from flat fields, or a nested args object.
+
+    The schema asks for flat named properties because models fill those in far
+    more reliably, but a model may still nest them under `args`; accept both.
+    """
+    args = {k: step[k] for k in ARG_KEYS if step.get(k) is not None}
+    nested = step.get("args")
+    if isinstance(nested, dict):
+        for key, value in nested.items():
+            args.setdefault(key, value)
+    return args
+
+
 def _steps_from_args(raw: dict) -> list[ActionCall]:
     return [
         ActionCall(
             name=str(s.get("name", "")),
-            args=dict(s.get("args") or {}),
+            args=_step_args(s),
             rationale=str(s.get("rationale", "")),
         )
         for s in raw.get("steps", [])
+        if isinstance(s, dict)
     ]
 
 
@@ -146,7 +189,7 @@ class LLMClient:
 
     def propose(
         self, command: str, state: dict, feedback: list[str] | None = None
-    ) -> Plan | Question:
+    ) -> Plan | Question | Answer:
         messages = [
             {"role": "system", "content": SYSTEM_PROMPT},
             {
@@ -188,6 +231,8 @@ class LLMClient:
 
         if call.function.name == "ask_user":
             return Question(text=str(args.get("question", "Could you clarify?")))
+        if call.function.name == "answer":
+            return Answer(text=str(args.get("text", "")))
         return Plan(steps=_steps_from_args(args), summary=str(args.get("summary", "")))
 
 
@@ -205,9 +250,17 @@ class MockLLM:
 
     def propose(
         self, command: str, state: dict, feedback: list[str] | None = None
-    ) -> Plan | Question:
+    ) -> Plan | Question | Answer:
         self.usage.calls += 1
         text = command.lower()
+
+        if not feedback and any(
+            q in text for q in ("what is on", "what's on", "list", "is there", "anything")
+        ):
+            names = ", ".join(
+                n for n, o in state["objects"].items() if o["on_table"] and o["graspable"]
+            )
+            return Answer(text=f"On the table: {names}, plus the tray they can go on.")
 
         def step(name, rationale, **args):
             return ActionCall(name=name, args=args, rationale=rationale)
@@ -305,6 +358,6 @@ def build_llm(mock: bool) -> LLMClient | MockLLM:
 
 
 __all__ = [
-    "LLMClient", "MockLLM", "Plan", "Question", "Usage",
+    "LLMClient", "MockLLM", "Plan", "Question", "Answer", "Usage",
     "describe_state", "build_llm", "SYSTEM_PROMPT",
 ]

@@ -12,7 +12,7 @@ from dataclasses import dataclass, field
 
 from ..actions.executor import validate_plan
 from ..actions.schema import ActionCall
-from .llm import Plan, Question
+from .llm import Answer, Plan, Question
 
 MAX_REPLANS = 2
 MAX_REPLAN_ATTEMPTS = 2
@@ -25,13 +25,19 @@ class Outcome:
     steps: list[ActionCall] = field(default_factory=list)
     summary: str = ""
     question: str | None = None
+    answer: str | None = None
     problems: list[str] = field(default_factory=list)
     attempts: int = 0
     rejected: list[tuple[list[ActionCall], list[str]]] = field(default_factory=list)
 
     @property
     def ok(self) -> bool:
-        return bool(self.steps) and not self.problems and self.question is None
+        return (
+            bool(self.steps)
+            and not self.problems
+            and self.question is None
+            and self.answer is None
+        )
 
 
 def plan(
@@ -55,6 +61,10 @@ def plan(
 
         if isinstance(proposal, Question):
             outcome.question = proposal.text
+            return outcome
+
+        if isinstance(proposal, Answer):
+            outcome.answer = proposal.text
             return outcome
 
         if not isinstance(proposal, Plan) or not proposal.steps:

@@ -173,6 +173,9 @@ All parameters carry units in their names and have explicit bounds.
 | `home()` | none | arm at home pose | safe |
 | `ask_user(question)` | none | none | safe |
 
+A question about the scene is not an action. "What is on the table?" is answered with the `answer`
+tool; turning it into a clarification question is a bug, not caution.
+
 Safety rules:
 - Classification is **deterministic code in `actions/safety.py`**, never LLM judgment. The LLM cannot
   downgrade it. `classify` returns a `Safety` enum, so a typo cannot silently become "safe".
@@ -183,8 +186,11 @@ Safety rules:
 ## 7. Agent loop
 
 1. **Observe:** get world state, serialize compactly for the prompt.
-2. **Plan:** the LLM must call `propose_plan(steps=[{name, args, rationale}], summary)` or
-   `ask_user(question)` when a reference is genuinely ambiguous.
+2. **Plan:** the LLM answers with exactly one of three tools: `propose_plan(steps, summary)` to move
+   something, `answer(text)` to reply to a question about the scene or explain what it cannot do, or
+   `ask_user(question)` when a reference is genuinely ambiguous. Step arguments are **flat named
+   properties**, not a nested `args` object -- with a nested object models routinely emitted
+   `args: {}` and the plan was rejected for missing arguments.
 3. **Validate:** check preconditions symbolically in order. If invalid, return the errors to the LLM
    and replan (max 2 times).
 4. **Show plan:** a `rich` table with step number, action, args, rationale, safety badge.

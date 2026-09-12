@@ -104,35 +104,62 @@ def describe_actions() -> str:
 def plan_tool_schema() -> list[dict]:
     """The tool definitions handed to the LLM.
 
-    `name` is pinned to an enum of the six real actions. Without it, models invent
-    plausible-sounding steps -- gpt-4o proposed a `locate_red_block` on the first
-    try during Phase 0. The enum plus the symbolic validator keeps a hallucinated
-    plan out of the executor.
+    Two things here are load-bearing.
+
+    `name` is pinned to an enum of the six real actions. Without it, models
+    invent plausible-sounding steps -- gpt-4o proposed a `locate_red_block` on
+    the first try.
+
+    The arguments are **flat, named properties on the step**, not a nested
+    free-form `args` object. With a nested object, models routinely emitted
+    `args: {}` and the plan was rejected for missing arguments even with the
+    action catalogue in the system prompt. Named properties are validated by the
+    provider and are far more reliably filled in.
     """
     step = {
         "type": "object",
         "properties": {
-            "name": {"type": "string", "enum": list(ACTION_NAMES)},
-            "args": {
-                "type": "object",
-                "description": (
-                    "Arguments for this action, using the exact keys listed for it "
-                    "in the system prompt. Must not be empty unless the action is home."
-                ),
+            "name": {
+                "type": "string",
+                "enum": list(ACTION_NAMES),
+                "description": "Which action to run.",
             },
+            "object": {
+                "type": "string",
+                "description": "Object to act on. Required by pick and push.",
+            },
+            "target": {
+                "type": "string",
+                "description": "Object to place onto. Required by place_on.",
+            },
+            "x_m": {"type": "number", "description": "Required by place_at, in metres."},
+            "y_m": {"type": "number", "description": "Required by place_at, in metres."},
+            "direction": {
+                "type": "string",
+                "enum": list(DIRECTIONS),
+                "description": "Required by push.",
+            },
+            "distance_m": {
+                "type": "number",
+                "description": f"Required by push, in metres, 0 to {MAX_PUSH_DISTANCE_M}.",
+            },
+            "question": {"type": "string", "description": "Required by ask_user."},
             "rationale": {
                 "type": "string",
                 "description": "One short sentence on why this step is needed.",
             },
         },
-        "required": ["name", "args", "rationale"],
+        "required": ["name", "rationale"],
     }
     return [
         {
             "type": "function",
             "function": {
                 "name": "propose_plan",
-                "description": "Propose the complete plan of physical actions.",
+                "description": (
+                    "Propose the complete plan of physical actions. Use this only "
+                    "when the user wants something moved."
+                ),
                 "parameters": {
                     "type": "object",
                     "properties": {
@@ -149,8 +176,29 @@ def plan_tool_schema() -> list[dict]:
         {
             "type": "function",
             "function": {
+                "name": "answer",
+                "description": (
+                    "Answer the user directly, without moving anything. Use this for "
+                    "questions about the scene ('what is on the table?', 'is anything "
+                    "fragile?') and to explain what you cannot do."
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "text": {"type": "string", "description": "The answer, in plain English."}
+                    },
+                    "required": ["text"],
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
                 "name": "ask_user",
-                "description": "Ask the user to resolve a genuinely ambiguous reference.",
+                "description": (
+                    "Ask the user to resolve a genuinely ambiguous reference. Only use "
+                    "this when their answer would change which action you take."
+                ),
                 "parameters": {
                     "type": "object",
                     "properties": {"question": {"type": "string"}},
@@ -161,9 +209,14 @@ def plan_tool_schema() -> list[dict]:
     ]
 
 
+# Step fields that carry action arguments, as opposed to bookkeeping.
+ARG_KEYS = ("object", "target", "x_m", "y_m", "direction", "distance_m", "question")
+
+
 __all__ = [
     "Safety", "ActionCall", "ActionResult", "ACTIONS", "ACTION_NAMES",
     "DIRECTIONS", "DIRECTION_VECTORS", "MAX_PUSH_DISTANCE_M",
     "PLACEMENT_TOLERANCE_M", "LIFT_HEIGHT_M", "APPROACH_HEIGHT_M",
     "MIN_REACH_M", "MAX_REACH_M", "plan_tool_schema", "SIGNATURES", "describe_actions",
+    "ARG_KEYS",
 ]
