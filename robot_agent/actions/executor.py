@@ -9,6 +9,7 @@ from typing import Callable
 from ..sim.backends import ArmBackend
 from .safety import check_preconditions, classify
 from .schema import (
+    ACTIONS,
     APPROACH_HEIGHT_M,
     DIRECTION_VECTORS,
     LIFT_HEIGHT_M,
@@ -84,8 +85,10 @@ def _apply_effects(call: ActionCall, state: dict) -> dict:
     objects, gripper = s["objects"], s["gripper"]
     name, args = call.name, call.args
 
+    # Defensive throughout: a model can emit any shape, and a malformed step
+    # must fail validation with a readable message, never crash the validator.
     if name == "pick":
-        target = args["object"]
+        target = args.get("object")
         if target in objects:
             obj = objects[target]
             parent = obj["on_top_of"]
@@ -100,7 +103,7 @@ def _apply_effects(call: ActionCall, state: dict) -> dict:
             gripper["holding"] = target
 
     elif name == "place_on":
-        held, target = gripper["holding"], args["target"]
+        held, target = gripper["holding"], args.get("target")
         if held and target in objects:
             spot = place_on_spot(s, target, held)
             objects[held].update(
@@ -111,8 +114,11 @@ def _apply_effects(call: ActionCall, state: dict) -> dict:
 
     elif name == "place_at":
         held = gripper["holding"]
-        if held:
-            x, y = float(args["x_m"]), float(args["y_m"])
+        if held and "x_m" in args and "y_m" in args:
+            try:
+                x, y = float(args["x_m"]), float(args["y_m"])
+            except (TypeError, ValueError):
+                return s
             t = s["table_bounds_m"]
             on = t["x_min"] <= x <= t["x_max"] and t["y_min"] <= y <= t["y_max"]
             objects[held].update(
@@ -122,10 +128,13 @@ def _apply_effects(call: ActionCall, state: dict) -> dict:
             gripper["holding"] = None
 
     elif name == "push":
-        target = args["object"]
+        target = args.get("object")
         if target in objects:
-            dx, dy = DIRECTION_VECTORS.get(args["direction"], (0.0, 0.0))
-            d = float(args["distance_m"])
+            dx, dy = DIRECTION_VECTORS.get(args.get("direction", ""), (0.0, 0.0))
+            try:
+                d = float(args.get("distance_m", 0.0))
+            except (TypeError, ValueError):
+                return s
             pos = objects[target]["position_m"]
             nx, ny = pos[0] + dx * d, pos[1] + dy * d
             t = s["table_bounds_m"]
@@ -133,6 +142,21 @@ def _apply_effects(call: ActionCall, state: dict) -> dict:
             objects[target].update(position_m=[nx, ny, pos[2] if on else 0.0], on_table=on)
 
     return s
+
+
+def classify_plan(plan: list[ActionCall], state: dict) -> list[tuple[Safety, str]]:
+    """Classify every step against the state as it will be when that step runs.
+
+    Classifying all steps against the initial state produces vague reasons -- a
+    place_at in step 2 does not yet know which object the gripper will be
+    holding, so the prompt says "the held object" instead of naming the cup.
+    """
+    levels: list[tuple[Safety, str]] = []
+    current = state
+    for call in plan:
+        levels.append(classify(call, current))
+        current = _apply_effects(call, current)
+    return levels
 
 
 def validate_plan(plan: list[ActionCall], state: dict) -> list[str]:
@@ -150,6 +174,10 @@ def _verify(call: ActionCall, before: dict, after: dict) -> tuple[bool, str]:
     """Check the postcondition of a call against ground truth."""
     name, args = call.name, call.args
     objects = after["objects"]
+    required, _ = ACTIONS.get(name, ((), ""))
+    missing = [a for a in required if a not in args]
+    if missing:
+        return False, f"{name} is missing argument(s): {', '.join(missing)}"
 
     if name == "pick":
         target = args["object"]
@@ -302,6 +330,7 @@ def _run(call: ActionCall, backend: ArmBackend, state: dict) -> tuple[bool, str]
 
 
 __all__ = [
-    "validate_plan", "execute", "classify", "check_preconditions", "place_on_spot",
+    "validate_plan", "classify_plan", "execute", "classify", "check_preconditions",
+    "place_on_spot",
     "ActionCall", "ActionResult", "Safety",
 ]

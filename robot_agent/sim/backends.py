@@ -131,7 +131,10 @@ class MockBackend:
             return
         obj = self.state["objects"][held]
         x, y, _ = obj["position_m"]
+        # One-shot: the injected fault happens once so that the agent's recovery
+        # can succeed. A permanent drift would just loop until it gave up.
         x += self.drift_m
+        self.drift_m = 0.0
         support, top_z = self._support_under(held, x, y)
         obj.update(
             held=False,

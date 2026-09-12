@@ -94,6 +94,7 @@ robot_agent/
   actions/executor.py     # plan validation, execution, postcondition verification
   agent/llm.py            # OpenAI-compatible client + MockLLM
   agent/planner.py        # command -> plan, clarification, replanning
+  app/ui.py               # rich rendering: scene, plan table, badges, confirmations
   app/main.py             # single-threaded loop, viewer, terminal REPL, demo mode
 tests/
 runs/                     # JSONL logs and screenshots (gitignored)
@@ -252,8 +253,10 @@ Grasping:
 
 ## 9. App and demo
 
-- Run: `mjpython -m app.main` with flags `--mock-llm`, `--backend {panda,floating,mock}`, `--demo`,
-  `--record`, `--inject-failure`.
+- Run: `mjpython -m robot_agent.app.main` with flags `--mock-llm`,
+  `--backend {panda,floating,mock}`, `--demo`, `--record`, `--inject-failure`, `--no-log`.
+  `--backend mock` needs no simulator and no viewer, so it runs under plain `python` -- that is how
+  the loop is developed and tested.
 - Terminal UI with `rich`: scene summary, plan table, safety badges, confirmations, results.
 - Log each run to `runs/<timestamp>.jsonl`.
 - `--record` writes frames from `mujoco.Renderer` at the named camera and pipes them to `ffmpeg`
