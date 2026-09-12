@@ -348,3 +348,14 @@ def test_a_learned_skill_rehearses_on_a_named_arm_in_the_two_arm_scene():
     after = get_state()
     assert after["objects"]["red_block"]["position_m"] == before["objects"]["red_block"]["position_m"]
     assert arms.a.held is None and arms.b.held is None
+
+
+def test_a_human_verified_skill_skips_the_effect_check_but_not_the_stray_rule():
+    state = initial_state()
+    backend = MockBackend(state)
+    code = NUDGE.replace("return moved >= distance_m * 0.5", "return False")   # its own check would fail
+    skill = Skill(name="nudge", doc="", effect="", args=["object", "distance_m"], code=code,
+                  effect_kind="leaves_table", effect_of="object", trust="human")   # and the world would too
+    verdict = rehearse(skill, {"object": "red_block", "distance_m": 0.05}, backend, lambda: state)
+    assert verdict.ok and not verdict.verified and "user's word" in verdict.reason
+    assert skill.effect_label().startswith("human-verified")

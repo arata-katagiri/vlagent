@@ -284,17 +284,24 @@ def graph(registry) -> None:
                         border_style="magenta"))
 
 
-def confirm_revise(skill, attempt: int, remaining: int) -> bool:
-    """After a failed rehearsal: revise again, or stop here. Default is to revise."""
+def confirm_revise(skill, attempt: int, remaining: int, can_override: bool = True) -> str:
+    """After a failed rehearsal: 'revise' again, 'worked' (the person saw it succeed
+    and overrides the verdict), or 'stop'. Default is to revise."""
+    choices = "revise / worked / stop" if can_override else "revise / stop"
     try:
         answer = Prompt.ask(
-            f"  Let the planner revise [bold]{skill.name}[/bold] and rehearse again? "
-            f"({remaining} attempt(s) left; no or Ctrl-C stops)", default="yes"
+            f"  Rehearsal of [bold]{skill.name}[/bold] failed. Revise it ({remaining} attempt(s) left), "
+            f"or did it actually work? ({choices})", default="revise"
         )
     except (EOFError, KeyboardInterrupt):
         console.print()
-        return False
-    return answer.strip().lower() in ("yes", "y")
+        return "stop"
+    a = answer.strip().lower()
+    if a in ("worked", "it worked", "keep", "override", "w") and can_override:
+        return "worked"
+    if a in ("stop", "no", "n", "s"):
+        return "stop"
+    return "revise"
 
 
 def confirm_keep(skill) -> bool:

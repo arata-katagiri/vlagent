@@ -141,6 +141,9 @@ def _as_turn(kind: str, f: dict) -> dict | None:
                 "content": f"Rehearsed {f.get('name')} attempt {f.get('attempt')}: {status} ({who}), "
                            f"{f.get('reason', '')}. " + ("; ".join(facts) if facts else "")}
     if kind == "skill_kept":
+        if f.get("overridden"):
+            return {"role": "assistant", "content": f"The user overrode a failed rehearsal and kept skill {f.get('name')} "
+                                                   f"({f.get('level')}, human-verified): {f.get('reason', '')}"}
         return {"role": "assistant", "content": f"The user kept skill {f.get('name')} ({f.get('level')}); it is now in the catalogue."}
     if kind == "skill_discarded":
         return {"role": "assistant", "content": f"The user discarded skill {f.get('name')} after rehearsal."}
@@ -485,12 +488,32 @@ def _learn_skill(proposal: SkillProposal, command: str, get_state, backend, llm,
                 how = f"measured motion distance {d:.2f}" if d is not None else "you said it was derived from this"
                 feedback.append(f"rehearsal hint: existing skill {other.signature()} ({how}) passed before; its code:\n{other.code}")
 
-        if attempt == MAX_SKILL_REVISIONS:
-            break
-        if not ui.confirm_revise(skill, attempt, MAX_SKILL_REVISIONS - attempt):
+        can_override = bad == [] and skill.name.isidentifier() and verdict.error is None
+        choice = ui.confirm_revise(skill, attempt, MAX_SKILL_REVISIONS - attempt, can_override=can_override)
+        if choice == "stop":
             log.write("skill_stopped", name=skill.name, attempt=attempt)
             ui.note(f"  stopped; {skill.name} was not kept")
             return None
+        if choice == "worked" and can_override:
+            # The person saw it succeed. Keep it, but say so in the record: the
+            # world did not confirm the effect, and the safety class is still measured.
+            from ..skills.rehearse import classify as classify_metrics  # noqa: PLC0415
+
+            level, safety_why = classify_metrics(verdict.metrics)
+            record = verdict.as_record()
+            record.update(ok=True, level=level, verified=False, overridden=True,
+                          reason=f"kept on the user's word ({verdict.reason}); {safety_why}")
+            skill.trust = "human"
+            skill.rehearsals.append(record)
+            skill.calls = list(verdict.metrics.get("calls", []))
+            skill.signature_vec = list(verdict.metrics.get("signature", []))
+            skill.derived_from = proposal.derived_from
+            REGISTRY.register(skill)
+            log.write("skill_kept", name=skill.name, level=level, overridden=True, reason=verdict.reason)
+            ui.note(f"  {skill.name} kept on your word (human-verified) and saved to {REGISTRY.dir / (skill.name + '.json')}")
+            return skill
+        if attempt == MAX_SKILL_REVISIONS:
+            break
         ui.note("  asking the planner to revise the skill")
         try:
             proposal2 = llm.propose(command, get_state(), feedback)

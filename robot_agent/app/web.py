@@ -198,9 +198,12 @@ class WebSink:
         text = f"Rehearsal passed. Keep {skill.name} as a skill and run it for real?"
         return self.ask(text, ["yes", "no"], "yes") == "yes"
 
-    def _confirm_revise(self, skill, attempt: int, remaining: int) -> bool:
-        text = f"Rehearsal failed. Let the planner revise {skill.name} and rehearse again? ({remaining} attempt(s) left)"
-        return self.ask(text, ["revise", "stop"], "revise") == "revise"
+    def _confirm_revise(self, skill, attempt: int, remaining: int, can_override: bool = True) -> str:
+        text = (f"Rehearsal of {skill.name} failed. Revise it ({remaining} attempt(s) left), "
+                "or did it actually work? If you saw it succeed, override the verdict and keep it.")
+        options = ["revise", "it worked", "stop"] if can_override else ["revise", "stop"]
+        got = self.ask(text, options, "revise")
+        return "worked" if got == "it worked" else got
 
     def _confirm_keep_rule(self, rule) -> bool:
         text = f"Keep {rule.name} as a standing safety rule?"
@@ -215,7 +218,7 @@ def library_event() -> dict:
         "type": "library",
         "skills": [
             {"name": s.name, "signature": s.signature(), "effect": s.effect, "measured": s.effect_label(),
-             "level": s.last_level, "verified": s.world_verified, "stale": s.stale, "calls": s.calls,
+             "level": s.last_level, "verified": s.world_verified, "trust": s.trust, "stale": s.stale, "calls": s.calls,
              "uses": s.uses, "args": s.args, "code": s.code}
             for s in REGISTRY.skills.values()
         ],
@@ -235,6 +238,29 @@ def make_app(info: dict):
     async def index():
         return HTMLResponse((STATIC / "index.html").read_text(),
                             headers={"Cache-Control": "no-store, max-age=0", "Pragma": "no-cache"})
+
+    @app.get("/graph.png")
+    async def graph_png():
+        """The skill graph, drawn by app/graph_window.py from the live registry."""
+        from fastapi.responses import Response  # noqa: PLC0415
+
+        def render() -> bytes:
+            import matplotlib  # noqa: PLC0415
+            matplotlib.use("Agg")
+            import matplotlib.pyplot as plt  # noqa: PLC0415
+
+            from ..skills.registry import REGISTRY  # noqa: PLC0415
+            from .graph_window import draw  # noqa: PLC0415
+
+            fig, ax = plt.subplots(figsize=(6.4, 3.6), dpi=110)
+            draw(ax, REGISTRY)
+            buf = io.BytesIO()
+            fig.savefig(buf, format="png", facecolor="#171a21", bbox_inches="tight")
+            plt.close(fig)
+            return buf.getvalue()
+
+        png = await asyncio.get_event_loop().run_in_executor(None, render)
+        return Response(png, media_type="image/png", headers={"Cache-Control": "no-store"})
 
     @app.get("/stream")
     async def stream():

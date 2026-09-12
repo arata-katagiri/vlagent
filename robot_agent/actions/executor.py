@@ -257,7 +257,14 @@ def _run_skill(call: ActionCall, backend, get_state) -> tuple[bool, str]:
     skill.uses += 1
     mentioned = {v for v in skill_args.values() if isinstance(v, str) and v in before["objects"]}
     metrics = measure(before, after, mentioned, touched=arm.touched)
-    ok, why, verified = verify_effect(skill, skill_args, before, after, metrics, mentioned)
+    if skill.trust == "human":
+        strays = [n for n in metrics["off_table"] if n not in mentioned]
+        if strays:
+            return False, f"{', '.join(strays)} left the table and was not part of the request"
+        ok, why, verified = True, "human-verified skill; the world did not check the effect", False
+        fns["check"] = None
+    else:
+        ok, why, verified = verify_effect(skill, skill_args, before, after, metrics, mentioned)
     if not ok:
         return False, f"effect not achieved: {why}"
     if policy_enabled():
@@ -273,7 +280,8 @@ def _run_skill(call: ActionCall, backend, get_state) -> tuple[bool, str]:
         if not c_ok:
             return False, f"the skill's own check failed: {c_why or skill.effect}"
         note = note or c_why or skill.effect
-    _LAST_SKILL_NOTE = (note or classify_metrics(metrics)[1]) + (" [world-verified]" if verified else " [self-reported]")
+    tag = " [world-verified]" if verified else (" [human-verified]" if skill.trust == "human" else " [self-reported]")
+    _LAST_SKILL_NOTE = (note or classify_metrics(metrics)[1]) + tag
     return True, ""
 
 

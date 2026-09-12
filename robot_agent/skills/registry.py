@@ -53,6 +53,7 @@ class Skill:
     derived_from: str = ""                                 # the model's opinion
     similar_to: list[str] = field(default_factory=list)    # the model's opinion
     stale: bool = False                                    # a skill it calls was revised
+    trust: str = "world"                                   # "world" | "human": who confirmed the effect
     author: str = "model"
     created: str = ""
     rehearsals: list[dict] = field(default_factory=list)
@@ -71,9 +72,11 @@ class Skill:
 
     @property
     def world_verified(self) -> bool:
-        return self.effect_kind in EFFECT_KINDS and self.effect_kind != "other"
+        return self.trust == "world" and self.effect_kind in EFFECT_KINDS and self.effect_kind != "other"
 
     def effect_label(self) -> str:
+        if self.trust == "human":
+            return "human-verified (rehearsal overridden)"
         if not self.world_verified:
             return "self-reported"
         v = f", {self.effect_value}" if self.effect_value else ""

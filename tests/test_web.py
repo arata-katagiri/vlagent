@@ -161,3 +161,27 @@ def test_relaunch_argv_replaces_scene_and_drops_fen(monkeypatch):
     monkeypatch.setattr(sys, "argv", ["main.py", "--web", "8000", "--safety", "--scene", "chess", "--fen", "opening"])
     argv = _relaunch_argv("lab")
     assert argv[-2:] == ["--scene", "lab"] and "--fen" not in argv and "--safety" in argv and "8000" in argv
+
+
+def test_revise_prompt_offers_it_worked_and_maps_it(sink):
+    from robot_agent.skills.registry import Skill
+
+    result = {}
+    skill = Skill(name="sweep", doc="", effect="", args=["object"], code="def run(arm): pass")
+
+    def ask():
+        result["v"] = ui.confirm_revise(skill, 1, 2)
+
+    t = threading.Thread(target=ask); t.start()
+    prompt = None
+    for _ in range(200):
+        for e in _drain(sink):
+            if e["type"] == "prompt":
+                prompt = e
+        if prompt:
+            break
+        t.join(0.01)
+    assert prompt["options"] == ["revise", "it worked", "stop"]
+    sink.answers.put((prompt["id"], "it worked"))
+    t.join(2)
+    assert result["v"] == "worked"

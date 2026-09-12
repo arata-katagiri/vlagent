@@ -301,11 +301,19 @@ def rehearse(skill: Skill, args: dict, backend, get_state, registry=None,
         return Verdict(False, f"the code failed: {error}", metrics=metrics, error=error)
 
     # The world judges the declared effect first; the model's check() is an
-    # extra condition, never a substitute.
-    ok, why, verified = verify_effect(skill, args, before, after, metrics, mentioned)
+    # extra condition, never a substitute. A human override (trust == "human")
+    # skips both, but never the stray-object rule or the safety class.
+    if skill.trust == "human":
+        strays = [n for n in metrics["off_table"] if n not in mentioned]
+        if strays:
+            return Verdict(False, f"{', '.join(strays)} left the table and was not part of the request", metrics=metrics, verified=True)
+        ok, why, verified = True, "kept on the user's word; the world did not confirm the effect", False
+        fns["check"] = None
+    else:
+        ok, why, verified = verify_effect(skill, args, before, after, metrics, mentioned)
     if not ok:
         return Verdict(False, f"effect not achieved: {why}", metrics=metrics, verified=verified)
-    world_note = why if verified else ""
+    world_note = why if (verified or skill.trust == "human") else ""
 
     # Learned safety rules judge the measured after-state (policy on only).
     from ..actions.safety import policy_enabled  # noqa: PLC0415
